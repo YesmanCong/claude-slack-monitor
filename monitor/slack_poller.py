@@ -34,7 +34,8 @@ MAX_BATCH = 20
 RESPAWN_DELAY_SECONDS = 5
 HANDLING_ACTIONS = {"auto": "自动处理", "ask": "放上看板问你", "remind": "只告诉你一声", "refuse": "用固定的话婉拒"}
 NOT_AUTO = ("ask", "remind", "refuse")
-# (intent, 名字, 包括哪些消息, 默认处理方式, 能选的处理方式)。approve / merge、生产和撤不回的、涉及安全的三类不能选自动处理。
+# (intent, 名字, 包括哪些消息, 默认处理方式, 能选的处理方式)。功能分支的 approve / merge、生产和撤不回的、涉及安全的三类不能选自动处理。
+# 发布分支合并 PR 里的功能改动已经在各自的功能分支 PR 里 review 过，所以它的 approve 可以自动。
 MESSAGE_INTENTS = (
     ("knowledge", "业务或技术咨询", "问需求细节、代码逻辑、接口、数据", "auto", tuple(HANDLING_ACTIONS)),
     ("progress", "进度和发版", "问做到哪了、什么时候发 staging、什么时候上线", "auto", tuple(HANDLING_ACTIONS)),
@@ -44,7 +45,9 @@ MESSAGE_INTENTS = (
      tuple(HANDLING_ACTIONS)),
     ("closing", "收尾和闲聊", "道谢、附和、「666」：需要时回一句，不需要就不回", "auto", tuple(HANDLING_ACTIONS)),
     ("meeting", "会议", "约会、开会提醒、改时间", "remind", tuple(HANDLING_ACTIONS)),
-    ("approve", "approve 或 merge", "请你 approve PR、merge、合 staging", "ask", NOT_AUTO),
+    ("release_approve", "发布分支合并的 approve", "请你 review 的 PR 是 release/* → staging 或 staging → master，"
+     "推送里带了脚本核对过的 release_merge：approve 核对过的那个 commit，不 merge", "auto", tuple(HANDLING_ACTIONS)),
+    ("approve", "approve 或 merge", "请你 approve 功能分支的 PR、merge、合 staging", "ask", NOT_AUTO),
     ("commitment", "替你拍板", "答应需求范围或排期、方案取舍、评价同事的方案", "ask", tuple(HANDLING_ACTIONS)),
     ("production", "生产和撤不回的", "生产的写操作和配置、部署 staging / production、删数据、force push、DDL、新的收费资源", "ask",
      NOT_AUTO),
@@ -127,6 +130,27 @@ def sonarqube_failed(text):
     return "Quality Gate failed" in body
 
 
+def release_merge_pr(text):
+    """For a GitHub review request on a release/* → staging or staging → master PR in the same repo, return the verified PR."""
+    m = re.search(r"requested your review on .*\(([\w.-]+/[\w.-]+)#(\d+)\)\s*$", text, re.S)
+    if not m:
+        return None
+    repo, number = m.groups()
+    res = subprocess.run(["gh", "pr", "view", number, "-R", repo, "--json",
+                          "state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid"],
+                         capture_output=True, text=True, timeout=60)
+    if res.returncode != 0:
+        return None
+    pr = json.loads(res.stdout)
+    base, head = pr["baseRefName"], pr["headRefName"]
+    # A fork can name its branch release/x, so only branches of the repo itself count.
+    if pr["state"] != "OPEN" or pr["isDraft"] or pr["isCrossRepository"]:
+        return None
+    if not ((head.startswith("release/") and base == "staging") or (head == "staging" and base == "master")):
+        return None
+    return {"repo": repo, "number": int(number), "base": base, "head": head, "head_sha": pr["headRefOid"]}
+
+
 def matches(values, *fields):
     return any(v.lower() in (f or "").lower() for v in values for f in fields)
 
@@ -178,7 +202,8 @@ def format_batch(items):
     for it in items:
         lines.append(json.dumps({k: it.get(k) for k in
                                  ("source", "channel_id", "channel_name", "user_name", "ts", "thread_ts",
-                                  "permalink", "to_claude", "text")},
+                                  "permalink", "to_claude", "release_merge", "text")
+                                 if k != "release_merge" or it.get(k)},
                                 ensure_ascii=False))
     return "\n".join(lines)
 
@@ -206,6 +231,8 @@ def accept_item(item):
         entry["outcome"] = "被过滤"
         return
     item["to_claude"] = is_talking_to_claude(item, cfg)
+    if item["source"] == "github":
+        item["release_merge"] = release_merge_pr(item["text"])
     with buffer_lock:
         batch.append(item)
         last_item_at[0] = time.time()
@@ -659,7 +686,7 @@ def render_page(cfg, message=""):
 <label class="field"><span class="name">只看最近几个工作日</span><input type="number" name="max_age_workdays" min="1" max="10" value="{cfg['max_age_workdays']}" required></label>
 <div class="field"><span class="name">工作日</span><div class="days">{days}</div></div>
 </div></div></section>
-<section id="handling"><header><h3>处理方式</h3><p>每条消息先归到一类，再按这一类的设置处理。approve / merge、生产和涉及安全的三类不能自动处理。</p></header>
+<section id="handling"><header><h3>处理方式</h3><p>每条消息先归到一类，再按这一类的设置处理。功能分支的 approve / merge、生产和涉及安全的三类不能自动处理。</p></header>
 <div class="controls">
 <label class="check"><input type="checkbox" name="auto_handle"{" checked" if cfg["auto_handle"] else ""}>
 <span><b>允许自动处理</b><small>关掉后所有消息都放上看板问你，下面的设置先不生效。</small></span></label>

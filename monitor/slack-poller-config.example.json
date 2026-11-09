@@ -23,6 +23,7 @@
     "code_review": "auto",
     "closing": "auto",
     "meeting": "remind",
+    "release_approve": "auto",
     "approve": "ask",
     "commitment": "ask",
     "production": "ask",
