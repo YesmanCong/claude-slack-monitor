@@ -32,6 +32,7 @@ SEEN_TTL_SECONDS = 86400
 DEBOUNCE_SECONDS = 4
 MAX_BATCH = 20
 RESPAWN_DELAY_SECONDS = 5
+PR_COMMITS_LIMIT = 250
 HANDLING_ACTIONS = {"auto": "自动处理", "ask": "放上看板问你", "remind": "只告诉你一声", "refuse": "用固定的话婉拒"}
 NOT_AUTO = ("ask", "remind", "refuse")
 # (intent, 名字, 包括哪些消息, 默认处理方式, 能选的处理方式)。功能分支的 approve / merge、生产和撤不回的、涉及安全的三类不能选自动处理。
@@ -45,8 +46,8 @@ MESSAGE_INTENTS = (
      tuple(HANDLING_ACTIONS)),
     ("closing", "收尾和闲聊", "道谢、附和、「666」：需要时回一句，不需要就不回", "auto", tuple(HANDLING_ACTIONS)),
     ("meeting", "会议", "约会、开会提醒、改时间", "remind", tuple(HANDLING_ACTIONS)),
-    ("release_approve", "发布分支合并的 approve", "请你 review 的 PR 是 release/* → staging 或 staging → master，"
-     "推送里带了脚本核对过的 release_merge：approve 核对过的那个 commit，不 merge", "auto", tuple(HANDLING_ACTIONS)),
+    ("release_approve", "发布分支合并的 approve", "请你 review 的 PR 是白名单里的 release 分支 → staging，或 staging → master，"
+     "推送里带了脚本核对过的 release_merge，而且里面每个 commit 都在别的 PR 里 approve 过：approve 核对过的那个 commit，不 merge", "auto", tuple(HANDLING_ACTIONS)),
     ("approve", "approve 或 merge", "请你 approve 功能分支的 PR、merge、合 staging", "ask", NOT_AUTO),
     ("commitment", "替你拍板", "答应需求范围或排期、方案取舍、评价同事的方案", "ask", tuple(HANDLING_ACTIONS)),
     ("production", "生产和撤不回的", "生产的写操作和配置、部署 staging / production、删数据、force push、DDL、新的收费资源", "ask",
@@ -70,12 +71,13 @@ DEFAULT_CONFIG = {
     "channel_blacklist": [],
     "keyword_blacklist": [],
     "bot_failure_keywords": ["fail", "error", "SLA Miss", "timeout", "rollback"],
+    "release_branch_whitelist": [],
     "max_age_workdays": 2,
     "auto_handle": True,
     "intent_policy": {intent: default for intent, _, _, default, _ in MESSAGE_INTENTS},
 }
 LIST_FIELDS = ["user_whitelist", "user_blacklist", "channel_whitelist", "channel_blacklist",
-               "keyword_blacklist", "bot_failure_keywords"]
+               "keyword_blacklist", "bot_failure_keywords", "release_branch_whitelist"]
 
 status = {"state": "starting", "last_error": None, "last_item": None, "last_push": None, "needs_login": False}
 current_proc = [None]  # the live slack_source.mjs process, so shutdown can stop it too
@@ -130,8 +132,51 @@ def sonarqube_failed(text):
     return "Quality Gate failed" in body
 
 
-def release_merge_pr(text):
-    """For a GitHub review request on a release/* → staging or staging → master PR in the same repo, return the verified PR."""
+def gh_items(path, jq):
+    res = subprocess.run(["gh", "api", "--paginate", path, "--jq", jq], capture_output=True, text=True, timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip()[:200])
+    return [json.loads(line) for line in res.stdout.splitlines() if line.strip()]
+
+
+def approved_commits(repo, pr, cache):
+    """Commits of a merged PR that sit at or before its last approved commit, plus its squash/merge commit when the approval covers the final head."""
+    number = pr["number"]
+    if number not in cache:
+        approved = {r["commit_id"] for r in gh_items(f"repos/{repo}/pulls/{number}/reviews",
+                                                       '.[] | select(.state == "APPROVED") | {commit_id}')}
+        shas = [c["sha"] for c in gh_items(f"repos/{repo}/pulls/{number}/commits", ".[] | {sha}")]
+        last = max((i for i, sha in enumerate(shas) if sha in approved), default=-1)
+        covered = set(shas[:last + 1])
+        if shas and last == len(shas) - 1 and pr.get("merge_commit_sha"):
+            covered.add(pr["merge_commit_sha"])
+        cache[number] = covered
+    return cache[number]
+
+
+def unapproved_commits(repo, number):
+    """Non-merge commits of the PR that no other merged PR approved; an unverifiable PR reports itself as unapproved."""
+    try:
+        commits = gh_items(f"repos/{repo}/pulls/{number}/commits", ".[] | {sha, parents: (.parents | length)}")
+        if len(commits) >= PR_COMMITS_LIMIT:
+            return [f"超过 {PR_COMMITS_LIMIT} 个 commit，GitHub 只列得出前 {PR_COMMITS_LIMIT} 个"]
+        cache, missing = {}, []
+        for c in commits:
+            # shortcut: merge commits are skipped, so a conflict resolution made inside one is not checked; upgrade by diffing the merge against its parents.
+            if c["parents"] > 1:
+                continue
+            prs = gh_items(f"repos/{repo}/commits/{c['sha']}/pulls",
+                           ".[] | select(.merged_at != null) | {number, merge_commit_sha}")
+            if not any(c["sha"] in approved_commits(repo, p, cache) for p in prs if p["number"] != number):
+                missing.append(c["sha"][:9])
+        return missing
+    except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        return [f"查不了：{e}"]
+
+
+
+def release_merge_pr(text, release_branches):
+    """For a GitHub review request on a whitelisted release branch → staging or staging → master PR in the same repo, return the verified PR."""
     m = re.search(r"requested your review on .*\(([\w.-]+/[\w.-]+)#(\d+)\)\s*$", text, re.S)
     if not m:
         return None
@@ -146,9 +191,11 @@ def release_merge_pr(text):
     # A fork can name its branch release/x, so only branches of the repo itself count.
     if pr["state"] != "OPEN" or pr["isDraft"] or pr["isCrossRepository"]:
         return None
-    if not ((head.startswith("release/") and base == "staging") or (head == "staging" and base == "master")):
+    # A release branch can be cut from a feature branch, so only the whitelisted ones count.
+    if not ((head in release_branches and base == "staging") or (head == "staging" and base == "master")):
         return None
-    return {"repo": repo, "number": int(number), "base": base, "head": head, "head_sha": pr["headRefOid"]}
+    return {"repo": repo, "number": int(number), "base": base, "head": head, "head_sha": pr["headRefOid"],
+            "unapproved_commits": unapproved_commits(repo, int(number))}
 
 
 def matches(values, *fields):
@@ -232,7 +279,7 @@ def accept_item(item):
         return
     item["to_claude"] = is_talking_to_claude(item, cfg)
     if item["source"] == "github":
-        item["release_merge"] = release_merge_pr(item["text"])
+        item["release_merge"] = release_merge_pr(item["text"], cfg["release_branch_whitelist"])
     with buffer_lock:
         batch.append(item)
         last_item_at[0] = time.time()
@@ -620,6 +667,8 @@ def render_page(cfg, message=""):
         f'<label class="check"><input type="checkbox" name="sources" value="{s}"{" checked" if cfg["sources"].get(s, True) else ""}>'
         f'<span><b>{e(n)}</b><small>{e(sub)}</small></span></label>' for s, n, sub in SOURCE_LABELS)
     filters = "".join(list_field(*f) for f in FILTER_FIELDS)
+    release_branches = list_field("release_branch_whitelist", "能自动 approve 的 release 分支",
+                                  "名单里的分支合进 staging 时才自动 approve，一行一个完整分支名；留空就只认 staging → master。")
 
     on_sources = [n for s, n, _ in SOURCE_LABELS if cfg["sources"].get(s, True)]
     filter_total = sum(len(cfg[f]) for f, _, _ in FILTER_FIELDS)
@@ -691,6 +740,7 @@ def render_page(cfg, message=""):
 <label class="check"><input type="checkbox" name="auto_handle"{" checked" if cfg["auto_handle"] else ""}>
 <span><b>允许自动处理</b><small>关掉后所有消息都放上看板问你，下面的设置先不生效。</small></span></label>
 <div class="intents">{intent_rows}</div>
+{release_branches}
 </div></section>
 <div class="savebar"><span class="state">保存后立刻生效，不用重连</span><button class="btn" disabled>保存</button></div>
 </form>

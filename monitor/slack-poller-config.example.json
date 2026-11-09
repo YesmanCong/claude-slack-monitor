@@ -35,5 +35,6 @@
   "channel_whitelist": [],
   "channel_blacklist": [],
   "keyword_blacklist": [],
-  "bot_failure_keywords": ["fail", "error", "SLA Miss", "timeout", "rollback"]
+  "bot_failure_keywords": ["fail", "error", "SLA Miss", "timeout", "rollback"],
+  "release_branch_whitelist": ["release/main"]
 }

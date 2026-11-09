@@ -23,13 +23,14 @@
 
 ## 发布分支合并的 approve
 
-GitHub 的 review 请求，如果 PR 是同一个仓库的 `release/*` → `staging`，或者 `staging` → `master`，脚本会用 `gh` 核对 PR 还开着、不是 draft、不是 fork 来的，然后在推送那一行带上 `release_merge`（`repo`、`number`、`base`、`head`、`head_sha`）。没带 `release_merge` 的 review 请求都按功能分支处理。
+GitHub 的 review 请求，如果 PR 是同一个仓库里、设置页「能自动 approve 的 release 分支」名单里的分支 → `staging`，或者 `staging` → `master`，脚本会用 `gh` 核对 PR 还开着、不是 draft、不是 fork 来的，再逐个查 PR 里的 commit（merge commit 除外）：每个 commit 都要属于另一个已合并、而且 approve 过的 PR，approve 的那次 review 要在这个 commit 之后或就是它（squash 合并的 commit 看那个 PR 最后一个 commit 有没有被 approve）。查完在推送那一行带上 `release_merge`（`repo`、`number`、`base`、`head`、`head_sha`、`unapproved_commits`）。没带 `release_merge` 的 review 请求都按功能分支处理。
 
 这一类设成自动处理时：
 
-1. 再跑一次 `gh pr view <number> -R <repo> --json headRefOid,state`。如果 head 已经不是 `head_sha`，或者 PR 不是 OPEN 了，就不 approve，放上看板。
-2. approve 时钉在核对过的 commit 上：`gh api -X POST repos/<repo>/pulls/<number>/reviews -f event=APPROVE -f commit_id=<head_sha> -f body='<代发前缀> release 分支合并，自动 approve'`。
-3. 不 merge，不审代码，也不在 Slack 里回复。汇报的「已执行」写 PR 链接、base ← head 和 commit。撤回的办法是在 PR 上 dismiss 这条 review。
+1. `unapproved_commits` 不是空的，就不 approve，放上看板，detail 里列出这些 commit（或者查不了的原因）。
+2. 再跑一次 `gh pr view <number> -R <repo> --json headRefOid,state`。如果 head 已经不是 `head_sha`，或者 PR 不是 OPEN 了，就不 approve，放上看板。
+3. approve 时钉在核对过的 commit 上：`gh api -X POST repos/<repo>/pulls/<number>/reviews -f event=APPROVE -f commit_id=<head_sha> -f body='<代发前缀> release 分支合并，自动 approve'`。
+4. 不 merge，不审代码，也不在 Slack 里回复。汇报的「已执行」写 PR 链接、base ← head 和 commit。撤回的办法是在 PR 上 dismiss 这条 review。
 
 ## 怎么发 Slack
 
