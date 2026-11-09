@@ -4,6 +4,10 @@
 
 A long-running Claude Code session that receives your Slack DMs, mentions and GitHub / Notion / Jira notifications in real time, triages them by rules you set on a local settings page, and puts anything that needs your decision on a todo board in the side pane. UI and prompts are in Simplified Chinese.
 
+> **使用前须知**：本项目用网页版 Slack 的会话 cookie 以你本人的身份收消息，不是官方 Slack App。这种用法可能不符合 Slack 服务条款或你所在工作区的管理规定，使用前请确认工作区管理员允许，风险自负。
+>
+> **Notice**: this project reads Slack as you via your web session cookie, not through an official Slack app. That may violate Slack's terms of service or your workspace's policies. Check with your workspace admins before using it, at your own risk.
+
 ## 组成
 
 | 目录 | 是什么 |
