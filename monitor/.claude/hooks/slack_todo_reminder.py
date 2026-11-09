@@ -31,7 +31,8 @@ def build_reminder(poller):
 
 
 payload = json.load(sys.stdin)
-if str(payload.get("prompt", "")).lstrip().startswith("[slack-poller]"):
+prompt = str(payload.get("prompt", "")).lstrip()
+if prompt.startswith("[slack-poller]") and "新消息" in prompt.split("\n", 1)[0]:
     Path(__file__).with_suffix(".last").write_text(dt.datetime.now().isoformat(timespec="seconds") + "\n")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": build_reminder(load_poller())}},
                      ensure_ascii=False))

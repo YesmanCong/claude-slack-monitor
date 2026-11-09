@@ -74,3 +74,76 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 }
+
+test('archive button only on session cards, submits an archive prompt', async ($, on) => {
+  const submitted: string[] = []
+  mock.store(on)
+  mock.clock(on)
+  on('command.register', () => ({ value: { command: 'todo' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__slack-todo__add_todo' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ ...TODO, title: 'Slack 来的' })
+  await $.tool.call({ ...TODO, title: 'session 来的', source: 'session:local_abc-123/2026-11-09T04:41:05.663Z' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const archives = (await ui.findAll({ type: 'Button' })).map(b => b.key ?? '').filter(k => k.startsWith('archive-'))
+  expect(archives).toHaveLength(1)
+
+  await ui.press({ key: archives[0]! })
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]).toContain('[待办看板] 归档 session：local_abc-123')
+  expect(await ui.find({ type: 'Text', text: 'session 来的' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Slack 来的' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('resolve takes a pending card off the board without a prompt', async ($, on) => {
+  const submitted: string[] = []
+  const toasts: string[] = []
+  mock.store(on)
+  mock.clock(on)
+  on('command.register', () => ({ value: { command: 'todo' } }))
+  on('tool.register', () => ({ value: { tool: 'mcp__slack-todo__add_todo' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ ...TODO, title: '等你合 PR', source: 'session:s1/t1' })
+  await $.tool.call({ ...TODO, title: '还在等', source: 'session:s2/t1' })
+
+  const RESOLVE = 'mcp__slack-todo__resolve_todo' as const
+  expect((await $.tool.call({ tool: RESOLVE, source: 'session:s1/t1', reason: '' })).deny).toContain('required')
+  expect((await $.tool.call({ tool: RESOLVE, source: 'nope', reason: 'x' })).deny).toContain('No card')
+
+  const resolved = await $.tool.call({ tool: RESOLVE, source: 'session:s1/t1', reason: '用户在 session 里自己回了' })
+  expect('deny' in resolved && resolved.deny).toBe(false)
+  expect(toasts).toContain('已自动完成：等你合 PR')
+  const again = await $.tool.call({ tool: RESOLVE, source: 'session:s1/t1', reason: 'x' })
+  expect(again.deny).toContain('status: resolved')
+  const readd = await $.tool.call({ ...TODO, title: '等你合 PR', source: 'session:s1/t1' })
+  expect(readd.deny).toContain('status: resolved')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: '等你合 PR' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '还在等' })).toBeDefined()
+  expect(submitted).toHaveLength(0)
+  await ui.unmount()
+})

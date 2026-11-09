@@ -15,10 +15,11 @@ A long-running Claude Code session that receives your Slack DMs, mentions and Gi
 | `monitor/slack_source.mjs` | 实时源：用网页版 Slack 的会话 cookie（[gabriel-slack](https://www.npmjs.com/package/gabriel-slack)）连 Slack，把要看的消息一条一行 JSON 打到 stdout |
 | `monitor/slack_poller.py` | 拉起实时源，按配置过滤、去重、攒批，推进 Claude Code 会话的 inbox；同时在 http://127.0.0.1:8765 提供设置页 |
 | `monitor/slack_login.mjs` | 弹出一个独立的 Chrome 让你登录 Slack，拿到 cookie 验证通过后存进 macOS Keychain |
+| `monitor/slack_send.mjs` | 用同一个会话代发消息：顶部一行 `identity.agent_reply_header` 小字（Block Kit context，默认「Auto-reply from agent」），正文走 markdown block；纯文本开头带代发前缀，监控靠它认出自己发的 |
 | `monitor/slack_whoami.mjs` | 用登录态只读地查出配置要填的 user id、工作区子域名和通知 DM 的 channel id |
 | `monitor/.claude/hooks/slack_todo_reminder.py` | UserPromptSubmit hook：每条推送进来时把设置页当前的「处理方式」表注入给 Claude |
 | `monitor/slack-monitor.md`、`monitor/CLAUDE.md` | 给 Claude 的分诊规则模板，按自己的习惯改 |
-| `slack-todo/` | Claude Code mod：侧边的待办看板，提供 `add_todo` 工具和 `/todo` 命令，每张卡可以「按建议执行」「修改执行方式」或「忽略」 |
+| `slack-todo/` | Claude Code mod：侧边的待办看板，提供 `add_todo`、`resolve_todo` 工具和 `/todo` 命令，每张卡可以「按建议执行」「修改执行方式」或「忽略」；用户在别处处理完的卡由 Claude 用 `resolve_todo` 关掉 |
 
 ## 环境要求
 
