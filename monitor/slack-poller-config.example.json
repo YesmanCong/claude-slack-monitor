@@ -1,0 +1,38 @@
+{
+  "identity": {
+    "my_user_id": "U0123456789",
+    "team_domain": "your-workspace",
+    "agent_reply_prefixes": ["[Claude 😼]:", "[Claude :smirk_cat:]:"],
+    "claude_app_user_id": ""
+  },
+  "notification_dms": {
+    "github": "D0123456789",
+    "notion": "",
+    "jira": ""
+  },
+  "work_start": "09:00",
+  "work_end": "19:00",
+  "weekdays": [1, 2, 3, 4, 5],
+  "sources": {"mention": true, "dm": true, "github": true, "notion": true, "jira": true},
+  "max_age_workdays": 2,
+  "auto_handle": true,
+  "intent_policy": {
+    "knowledge": "auto",
+    "progress": "auto",
+    "test_env": "auto",
+    "code_review": "auto",
+    "closing": "auto",
+    "meeting": "remind",
+    "approve": "ask",
+    "commitment": "ask",
+    "production": "ask",
+    "secret": "refuse",
+    "other": "ask"
+  },
+  "user_whitelist": [],
+  "user_blacklist": [],
+  "channel_whitelist": [],
+  "channel_blacklist": [],
+  "keyword_blacklist": [],
+  "bot_failure_keywords": ["fail", "error", "SLA Miss", "timeout", "rollback"]
+}

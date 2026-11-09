@@ -1,0 +1,10 @@
+{
+  "name": "claude-slack-monitor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "gabriel-slack": "0.1.1",
+    "ws": "8.18.0"
+  }
+}

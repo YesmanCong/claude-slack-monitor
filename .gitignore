@@ -1,0 +1,13 @@
+node_modules/
+__pycache__/
+*.tmp
+.DS_Store
+
+# Personal config and runtime state: never commit these.
+monitor/slack-poller-config.json
+monitor/slack-poller-state.json
+monitor/slack-monitor-state.json
+monitor/.gabriel-state/
+monitor/.claude/hooks/*.last
+monitor/.claude/settings.local.json
+slack-todo/.claude-plugin/types/
