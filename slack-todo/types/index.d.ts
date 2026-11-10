@@ -1,4 +1,4 @@
-export type TodoStatus = 'pending' | 'accepted' | 'revised' | 'ignored'
+export type TodoStatus = 'pending' | 'accepted' | 'revised' | 'ignored' | 'resolved' | 'archived'
 
 export type Todo = {
   id: string
@@ -8,6 +8,7 @@ export type Todo = {
   detail?: string
   status: TodoStatus
   createdAt: number
+  resolution?: string
 }
 
 declare module 'claude-code' {

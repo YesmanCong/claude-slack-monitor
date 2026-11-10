@@ -1,6 +1,6 @@
 {
   "name": "slack-todo",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "待办看板：Claude 把需要你拍板的事列进来，逐条选择按建议执行、修改执行方式或忽略",
   "types": "./types/index.d.ts"
 }

@@ -3,6 +3,7 @@
     "my_user_id": "U0123456789",
     "team_domain": "your-workspace",
     "agent_reply_prefixes": ["[Claude 😼]:", "[Claude :smirk_cat:]:"],
+    "agent_reply_header": ":smirk_cat: Auto-reply from agent",
     "claude_app_user_id": ""
   },
   "notification_dms": {
@@ -15,6 +16,8 @@
   "weekdays": [1, 2, 3, 4, 5],
   "sources": {"mention": true, "dm": true, "github": true, "notion": true, "jira": true},
   "max_age_workdays": 2,
+  "follow_up_check_minutes": 60,
+  "session_scan_minutes": 15,
   "auto_handle": true,
   "intent_policy": {
     "knowledge": "auto",

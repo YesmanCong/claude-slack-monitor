@@ -26,6 +26,7 @@ from urllib.parse import parse_qs
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "slack-poller-config.json"
 STATE_PATH = HERE / "slack-poller-state.json"
+MONITOR_STATE_PATH = HERE / "slack-monitor-state.json"
 SOURCE_SCRIPT = "slack_source.mjs"
 PORT = 8765
 SEEN_TTL_SECONDS = 86400
@@ -73,6 +74,9 @@ DEFAULT_CONFIG = {
     "bot_failure_keywords": ["fail", "error", "SLA Miss", "timeout", "rollback"],
     "release_branch_whitelist": [],
     "max_age_workdays": 2,
+    # 工作时间内每隔多少分钟推一次「跟进检查」（只在 slack-monitor-state.json 的 follow_ups 非空时推）和「扫 session」；0 表示关掉。
+    "follow_up_check_minutes": 60,
+    "session_scan_minutes": 15,
     "auto_handle": True,
     "intent_policy": {intent: default for intent, _, _, default, _ in MESSAGE_INTENTS},
 }
@@ -86,6 +90,7 @@ file_lock = threading.Lock()
 buffer_lock = threading.Lock()
 batch = []            # kept items waiting to be pushed
 last_item_at = [0.0]  # mutable holder: when the last kept item arrived
+last_check_at = {"follow_up_check_minutes": time.time(), "session_scan_minutes": time.time()}
 recent = deque(maxlen=15)  # newest last; what the settings page lists under 最近收到
 
 
@@ -316,6 +321,33 @@ def flush_loop():
         with file_lock:
             state["outbox"] = outbox
             save_json(STATE_PATH, state)
+
+
+def timed_check_loop():
+    while True:
+        time.sleep(60)
+        now = dt.datetime.now()
+        with file_lock:
+            cfg = load_json(CONFIG_PATH, DEFAULT_CONFIG)
+        if not in_work_hours(cfg, now):
+            continue
+        follow_ups = load_json(MONITOR_STATE_PATH, {}).get("follow_ups") or []
+        checks = {
+            "follow_up_check_minutes": follow_ups and
+            f"跟进检查：{len(follow_ups)} 件在等别人回复，按 slack-monitor.md「跟进检查」处理。",
+            "session_scan_minutes": "扫 session：按 slack-monitor.md「扫 session」看其他 session 有没有在等你。",
+        }
+        for interval_key, text in checks.items():
+            minutes = cfg[interval_key]
+            if not text or not minutes or time.time() - last_check_at[interval_key] < minutes * 60:
+                continue
+            try:
+                push_to_session(f"[slack-poller] {now:%H:%M} {text}")
+            except OSError as e:
+                status["last_error"] = f"push 失败：{e}"[:300]
+                continue
+            last_check_at[interval_key] = time.time()
+            status["last_push"] = now.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def source_env():
@@ -820,4 +852,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     threading.Thread(target=source_loop, daemon=True).start()
     threading.Thread(target=flush_loop, daemon=True).start()
+    threading.Thread(target=timed_check_loop, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

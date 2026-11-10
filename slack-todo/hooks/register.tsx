@@ -5,6 +5,7 @@ import type { Todo, TodoStatus } from '../types'
 
 const PANE = 'slack-todo'
 const TOOL = 'mcp__slack-todo__add_todo'
+const RESOLVE_TOOL = 'mcp__slack-todo__resolve_todo'
 const STORE_KEY = 'todos'
 const HISTORY_LIMIT = 300
 const TITLE_MAX = 40
@@ -62,6 +63,25 @@ const TOOL_SCHEMA = {
   required: ['title', 'source', 'suggestion'],
 } as const
 
+const RESOLVE_DESCRIPTION = `Take a pending card off the user's todo board because it no longer needs them: the user already handled it elsewhere (answered the session directly, merged the PR themselves), or the thing it waited for happened. Nothing is sent back to you and the user is not asked.
+
+Only resolve a card you have checked: the session's last turn no longer asks the same question, the PR is merged, the person replied. Pass the card's exact \`source\` and a short Chinese \`reason\` saying what you saw. A card that is not pending (already accepted, revised, ignored or resolved) is refused with its status.`
+
+const RESOLVE_SCHEMA = {
+  type: 'object',
+  properties: {
+    source: {
+      type: 'string',
+      description: 'The source the card was added with.',
+    },
+    reason: {
+      type: 'string',
+      description: 'What you checked that shows the user no longer needs to act, one short line.',
+    },
+  },
+  required: ['source', 'reason'],
+} as const
+
 async function saveTodos($: EngineInterface, change: (list: Todo[]) => Todo[]) {
   const list = await update($, todos, change)
   await $.store.set(STORE_KEY, list)
@@ -95,6 +115,14 @@ function acceptPrompt(todo: Todo) {
 
 function revisePrompt(todo: Todo, instructions: string) {
   return `[待办看板] 不按原建议，按我的方式执行：${todo.title}\n${describeTodo(todo)}\n我的执行方式：${instructions}`
+}
+
+function sessionIdOf(source: string) {
+  return source.match(/^session:(local_[^/]+)\//)?.[1]
+}
+
+function archivePrompt(todo: Todo, sessionId: string) {
+  return `[待办看板] 归档 session：${sessionId}\n卡片：${todo.title}\n来源：${todo.source}`
 }
 
 function clamp(text: string, max: number) {
@@ -140,6 +168,12 @@ export const register: Register = on => {
       name: 'add_todo',
       description: TOOL_DESCRIPTION,
       inputSchema: TOOL_SCHEMA,
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: 'resolve_todo',
+      description: RESOLVE_DESCRIPTION,
+      inputSchema: RESOLVE_SCHEMA,
       isDeferred: false,
     })
     await $.command.register({
@@ -203,6 +237,33 @@ export const register: Register = on => {
     return { result: `Added to the board: ${title}. Wait for the user's decision; do not ask about it in chat.` }
   })
 
+  on('tool.call', { tool: RESOLVE_TOOL }, async ($, e) => {
+    const input = e as unknown as { source?: unknown; reason?: unknown }
+    const source = typeof input.source === 'string' ? input.source.trim() : ''
+    const reason = typeof input.reason === 'string' ? input.reason.trim() : ''
+    if (source === '' || reason === '') {
+      return { deny: 'source and reason are required non-empty strings.' }
+    }
+
+    const existing = (await read($, todos)).find(todo => todo.source === source)
+    if (existing === undefined) {
+      return { deny: `No card with source ${source}.` }
+    }
+    if (existing.status !== 'pending') {
+      return { deny: `Not pending (status: ${existing.status}): ${existing.title}` }
+    }
+
+    await saveTodos($, list =>
+      list.map(one =>
+        one.id === existing.id ? { ...one, status: 'resolved', resolution: reason } : one,
+      ),
+    )
+    await update($, revisingId, id => (id === existing.id ? null : id))
+    $.ui.toast(`已自动完成：${existing.title}`)
+
+    return { result: `Resolved: ${existing.title}` }
+  })
+
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const engineModes = await next(e)
     const pending = (await read($, todos)).filter(todo => todo.status === 'pending').length
@@ -244,6 +305,7 @@ export const register: Register = on => {
         </Text>
         {pending.map(todo => {
           const source = labelSource(todo.source)
+          const sessionId = sessionIdOf(todo.source)
           const isExpanded = expanded.includes(todo.id)
           const isRevising = Input !== undefined && revising === todo.id
           const isClamped =
@@ -325,6 +387,13 @@ export const register: Register = on => {
                   label="忽略"
                   onPress={() => decide($, todo, 'ignored')}
                 />
+                {sessionId !== undefined && (
+                  <Button
+                    key={`archive-${todo.id}`}
+                    label="归档 session"
+                    onPress={() => decide($, todo, 'archived', archivePrompt(todo, sessionId))}
+                  />
+                )}
               </Box>
               {Input !== undefined && isRevising && (
                 <Input
