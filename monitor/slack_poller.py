@@ -34,6 +34,8 @@ DEBOUNCE_SECONDS = 4
 MAX_BATCH = 20
 RESPAWN_DELAY_SECONDS = 5
 SLK_TIMEOUT_SECONDS = 60
+SLK_MIN_WINDOW_SECONDS = 600
+SLK_WINDOW_OVERLAP_SECONDS = 60
 PR_COMMITS_LIMIT = 250
 HANDLING_ACTIONS = {"auto": "自动处理", "ask": "放上看板问你", "remind": "只告诉你一声", "refuse": "用固定的话婉拒"}
 NOT_AUTO = ("ask", "remind", "refuse")
@@ -413,8 +415,13 @@ def slk_settings(cfg):
     return opts
 
 
-def poll_slk(cfg, opts):
-    command = [opts["binary"], "recent", "--within", "10m"]
+def poll_slk(cfg, opts, last_polled_at):
+    now = time.time()
+    within = SLK_MIN_WINDOW_SECONDS
+    if last_polled_at:
+        within = max(within, now - last_polled_at + SLK_WINDOW_OVERLAP_SECONDS)
+    within = min(within, now - workdays_ago_epoch(cfg["max_age_workdays"], dt.datetime.now()))
+    command = [opts["binary"], "recent", "--within", f"{int(within)}s"]
     if opts["workspace"]:
         command.extend(["--workspace", opts["workspace"]])
     env = {key: value for key, value in os.environ.items()
@@ -453,22 +460,40 @@ def source_loop():
             interval = DEFAULT_CONFIG["slk"]["poll_interval_seconds"]
             if status["state"] != "connected":
                 status["state"] = "connecting"
+            error = None
             try:
                 opts = slk_settings(cfg)
                 interval = opts["poll_interval_seconds"]
-                items = poll_slk(cfg, opts)
-                if items is not None:
-                    status.update(state="connected", needs_login=False, last_error=None)
-                    for item in items:
-                        if restart_source.is_set():
-                            break
-                        accept_item(item)
+                with file_lock:
+                    last_polled_at = load_json(STATE_PATH, {}).get("slk_polled_at")
+                started = time.time()
+                items = poll_slk(cfg, opts, last_polled_at)
             except ValueError as e:
-                status.update(state="error", needs_login=False, last_error=str(e))
+                error = str(e)
             except subprocess.TimeoutExpired:
-                status.update(state="error", needs_login=False, last_error="slk recent 查询超时")
+                error = "slk recent 查询超时"
             except OSError:
-                status.update(state="error", needs_login=False, last_error="无法运行 slk，请检查 slk.binary")
+                error = "无法运行 slk，请检查 slk.binary"
+            if error:
+                failures += 1
+                status.update(state="error", needs_login=False, last_error=error)
+                if failures == 3:
+                    try:
+                        push_to_session(f"[slack-poller] slk 连续 3 次读取失败：{error} 恢复后会补拉断开期间的消息。")
+                    except Exception:
+                        pass
+            elif items is not None:
+                failures = 0
+                status.update(state="connected", needs_login=False, last_error=None)
+                for item in items:
+                    if restart_source.is_set():
+                        break
+                    accept_item(item)
+                else:
+                    with file_lock:
+                        state = load_json(STATE_PATH, {})
+                        state["slk_polled_at"] = started
+                        save_json(STATE_PATH, state)
             restart_source.wait(interval)
             continue
         if backend != "gabriel":

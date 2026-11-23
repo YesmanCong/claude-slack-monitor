@@ -76,7 +76,7 @@ A long-running Claude Code session that receives your Slack DMs, mentions and Gi
 
 ## 使用 slk 读取 Slack Activity
 
-slk 定期读取 Slack Activity。监控会接收私信和 @ 提及，包括在频道 thread 里 @ 你的消息。下面的单次查询也会显示 Activity 中的其他 thread 回复。Slack 会合并同一对话里的部分活动，每次读取只能看到合并条目指向的消息。需要逐条实时接收或通过 @ 自己给 Claude 发指令时，使用默认的 Gabriel 消息源。
+slk 定期读取 Slack Activity。监控会接收私信和 @ 提及，包括在频道 thread 里 @ 你的消息。下面的单次查询也会显示 Activity 中的其他 thread 回复。Slack 会合并同一对话里的部分活动，每次读取只能看到合并条目指向的消息。监控停机或读取失败后，下一次成功读取会补拉从上次成功到现在的 Activity，最早到 `max_age_workdays` 个工作日前；连续 3 次读取失败时会在会话里提醒一次。需要逐条实时接收或通过 @ 自己给 Claude 发指令时，使用默认的 Gabriel 消息源。
 
 1. 从仓库根目录运行以下命令，构建与本项目配套的 slk。
 
