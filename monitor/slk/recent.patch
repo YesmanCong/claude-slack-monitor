@@ -1,0 +1,231 @@
+diff --git a/cmd/slk/main.go b/cmd/slk/main.go
+index 3562dcf..85fb01e 100644
+--- a/cmd/slk/main.go
++++ b/cmd/slk/main.go
+@@ -105,6 +105,12 @@ func main() {
+ 				os.Exit(1)
+ 			}
+ 			os.Exit(0)
++		case "recent":
++			if err := runRecent(os.Args[2:]); err != nil {
++				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
++				os.Exit(1)
++			}
++			return
+ 		case "export":
+ 			if err := exportChannel(os.Args[2:]); err != nil {
+ 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+@@ -192,6 +198,7 @@ Usage:
+   slk --remove-workspace  Remove a configured workspace (interactive)
+   slk --list-workspaces   List configured workspaces (TeamID, Slug, Name)
+   slk --dump-sections     Dump raw users.channelSections.list JSON (diagnostic)
++  slk recent [flags]      Read recent direct messages, mentions and thread replies
+   slk export [flags]      Export a channel's messages and threads to Markdown
+                           (see 'slk export --help')
+   slk --version          Print version and exit
+diff --git a/cmd/slk/recent_command.go b/cmd/slk/recent_command.go
+new file mode 100644
+index 0000000..d3cd815
+--- /dev/null
++++ b/cmd/slk/recent_command.go
+@@ -0,0 +1,159 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"flag"
++	"fmt"
++	"os"
++	"os/signal"
++	"path/filepath"
++	"sort"
++	"time"
++
++	"github.com/gammons/slk/internal/config"
++	"github.com/gammons/slk/internal/core"
++	"github.com/gammons/slk/internal/export"
++	"github.com/gammons/slk/internal/ids"
++	slackclient "github.com/gammons/slk/internal/slack"
++	"github.com/gammons/slk/internal/slackurl"
++)
++
++type recentMessage struct {
++	Kind      string `json:"kind"`
++	ChannelID string `json:"channel_id"`
++	TS        string `json:"ts"`
++	ThreadTS  string `json:"thread_ts,omitempty"`
++	AuthorID  string `json:"author_id"`
++	IsBot     bool   `json:"is_bot"`
++	Text      string `json:"text"`
++	Permalink string `json:"permalink,omitempty"`
++}
++
++func runRecent(args []string) error {
++	flags := flag.NewFlagSet("slk recent", flag.ContinueOnError)
++	window := flags.Duration("within", 10*time.Minute, "read activity targeting messages in this time window")
++	workspace := flags.String("workspace", "", "configured workspace slug, ID, or name")
++	if err := flags.Parse(args); err != nil {
++		if errors.Is(err, flag.ErrHelp) {
++			return nil
++		}
++		return err
++	}
++	if flags.NArg() != 0 || *window <= 0 {
++		return errors.New("expected only flags and a positive --within duration")
++	}
++
++	store := slackclient.NewTokenStore(filepath.Join(xdgData(), "tokens"))
++	tokens, err := store.List()
++	if err != nil {
++		return fmt.Errorf("list workspaces: %w", err)
++	}
++	cfg, _ := config.Load(filepath.Join(xdgConfig(), "config.toml"))
++	selected, err := selectExportToken(config.OrderTokens(tokens, cfg), *workspace)
++	if err != nil {
++		return err
++	}
++
++	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
++	defer stop()
++	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
++	defer cancel()
++	client := slackclient.NewClient(selected.AccessToken, selected.Cookie)
++	if err := client.Connect(ctx); err != nil {
++		return err
++	}
++	end := time.Now().Truncate(time.Second)
++	items, err := recentActivity(end.Add(-*window), end, func(cursor string) (slackclient.ActivityFeedResult, error) {
++		return client.GetActivityFeed(ctx, 40, cursor, false)
++	})
++	if err != nil {
++		return err
++	}
++
++	messages := make([]recentMessage, 0, len(items))
++	if len(items) == 0 {
++		return json.NewEncoder(os.Stdout).Encode(messages)
++	}
++	refs := make(map[string][]string)
++	for _, item := range items {
++		refs[item.ChannelID] = append(refs[item.ChannelID], item.TS)
++	}
++	bodies, err := client.GetActivityMessages(ctx, refs)
++	if err != nil {
++		return err
++	}
++	unavailable := 0
++	workspaceURL := "https://" + client.TeamSubdomain() + ".slack.com"
++	for _, item := range items {
++		body, ok := bodies[core.ActivityMsgKey(item.ChannelID, item.TS)]
++		if !ok {
++			unavailable++
++			continue
++		}
++		author := body.UserID
++		if author == "" {
++			author = item.AuthorID
++		}
++		if author == client.UserID() {
++			continue
++		}
++		link, ok := slackurl.Build(workspaceURL, ids.ChannelID(item.ChannelID), ids.MessageTS(item.TS), ids.ThreadTS(item.ThreadTS))
++		if !ok {
++			link, err = client.GetPermalink(ctx, item.ChannelID, item.TS, item.ThreadTS)
++			if err != nil {
++				fmt.Fprintf(os.Stderr, "could not resolve permalink for %s at %s\n", item.ChannelID, item.TS)
++			}
++		}
++		messages = append(messages, recentMessage{Kind: item.Type, ChannelID: item.ChannelID,
++			TS: item.TS, ThreadTS: item.ThreadTS, AuthorID: author,
++			IsBot: item.IsBot || item.Type == "bot_dm_bundle", Text: body.Text, Permalink: link})
++	}
++	if unavailable > 0 {
++		fmt.Fprintf(os.Stderr, "skipped %d unavailable activity messages\n", unavailable)
++	}
++	return json.NewEncoder(os.Stdout).Encode(messages)
++}
++
++func recentActivity(start, end time.Time, fetch func(string) (slackclient.ActivityFeedResult, error)) ([]core.ActivityItem, error) {
++	var items []core.ActivityItem
++	seenMessages := map[string]bool{}
++	seenCursors := map[string]bool{}
++	for cursor := ""; ; {
++		page, err := fetch(cursor)
++		if err != nil {
++			return nil, err
++		}
++		pastWindow := false
++		for _, item := range page.Items {
++			if feedTime, ok := export.TimeFromTS(item.FeedTS); ok && feedTime.Before(start) {
++				pastWindow = true
++			}
++			switch item.Type {
++			case "at_user", "unjoined_channel_mention", "dm", "bot_dm_bundle", "thread_v2":
++			default:
++				continue
++			}
++			ts, valid := export.TimeFromTS(item.TS)
++			if !valid || ts.Before(start) || ts.After(end) || item.ChannelID == "" {
++				continue
++			}
++			key := core.ActivityMsgKey(item.ChannelID, item.TS)
++			if !seenMessages[key] {
++				seenMessages[key] = true
++				items = append(items, item)
++			}
++		}
++		if pastWindow || page.NextCursor == "" {
++			break
++		}
++		if seenCursors[page.NextCursor] {
++			return nil, errors.New("activity feed repeated a pagination cursor")
++		}
++		cursor = page.NextCursor
++		seenCursors[cursor] = true
++	}
++	sort.SliceStable(items, func(i, j int) bool { return items[i].TS > items[j].TS })
++	return items, nil
++}
+diff --git a/cmd/slk/recent_command_test.go b/cmd/slk/recent_command_test.go
+new file mode 100644
+index 0000000..d66da89
+--- /dev/null
++++ b/cmd/slk/recent_command_test.go
+@@ -0,0 +1,35 @@
++package main
++
++import (
++	"reflect"
++	"testing"
++	"time"
++
++	"github.com/gammons/slk/internal/core"
++	slackclient "github.com/gammons/slk/internal/slack"
++)
++
++func TestRecentActivityFindsMessagesAcrossPages(t *testing.T) {
++	direct := core.ActivityItem{Type: "dm", ChannelID: "D1", TS: "190.000001", FeedTS: "200.000001"}
++	reply := core.ActivityItem{Type: "thread_v2", ChannelID: "C1", TS: "180.000002", FeedTS: "195.000001"}
++	mention := core.ActivityItem{Type: "at_user", ChannelID: "C1", TS: "175.000001", FeedTS: "191.000001"}
++	reaction := core.ActivityItem{Type: "message_reaction", ChannelID: "C2", TS: "199.000001", FeedTS: "199.000001"}
++	old := core.ActivityItem{Type: "at_user", ChannelID: "C2", TS: "90.000001", FeedTS: "90.000001"}
++	pages := map[string]slackclient.ActivityFeedResult{
++		"":     {Items: []core.ActivityItem{direct, reaction, reply}, NextCursor: "next"},
++		"next": {Items: []core.ActivityItem{reply, mention, old}, NextCursor: "older"},
++	}
++	items, err := recentActivity(time.Unix(100, 0), time.Unix(200, 0), func(cursor string) (slackclient.ActivityFeedResult, error) {
++		page, ok := pages[cursor]
++		if !ok {
++			t.Fatalf("requested an older page: %q", cursor)
++		}
++		return page, nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if want := []core.ActivityItem{direct, reply, mention}; !reflect.DeepEqual(items, want) {
++		t.Fatalf("got %+v, want %+v", items, want)
++	}
++}
