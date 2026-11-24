@@ -44,7 +44,8 @@ node slack_send.mjs --channel <channel_id> --thread <thread_ts> < body.md
 
 - 正文写进 scratchpad 里的一个 markdown 文件再从 stdin 喂进去，不要在命令行里拼正文。正文按普通 markdown 写，不用自己加前缀：脚本会在顶部加一行灰色小字（`identity.agent_reply_header`，默认「Auto-reply from agent」），并把 `identity.agent_reply_prefixes` 的第一项放在通知用的纯文本开头，监控靠它认出自己发的、不推回来。
 - 新起一条（不在 thread 里）就不传 `--thread`。
-- 成功时打出 `ts` 和 `permalink`，汇报里用这个链接。
+- 要带截图、附件就加 `--file <路径>`（可重复，单个不超过 50 MB）：正文发完，文件传到同一个 channel / thread。不要再开浏览器在 Slack 网页版发图。`--file` 不能和 `--update` 一起用；凭据类文件（`.env`、`*.pem`、`*.key` 等）脚本会拒绝。截图里不能有 token、API key 和别的 org 的数据。
+- 成功时打出 `ts` 和 `permalink`（带文件时还有 `files`），汇报里用这个链接。
 - 发之前检查正文里没有 token、密钥、密码、账号权限细节、客户数据。发完用 `slack_read_thread` / `slack_read_channel` 读回这条，确认顶部是那行 Auto-reply 小字；不是就在 thread 里补一条说明。
 - 脚本报错（会话失效、`invalid_blocks` 等）时不要换 Slack MCP 硬发，把报错告诉用户。
 
