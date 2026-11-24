@@ -251,10 +251,10 @@ index 0000000..d66da89
 +}
 diff --git a/cmd/slk/watch_command.go b/cmd/slk/watch_command.go
 new file mode 100644
-index 0000000..0a63cf9
+index 0000000..b30a7c7
 --- /dev/null
 +++ b/cmd/slk/watch_command.go
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,341 @@
 +package main
 +
 +import (
@@ -398,6 +398,11 @@ index 0000000..0a63cf9
 +		conversations:    make(map[string]watchConversation),
 +		conversationInfo: client.GetConversationInfo,
 +	}
++	if channels, err := client.GetChannels(ctx); err == nil {
++		for _, channel := range channels {
++			handler.OnConversationOpened(channel)
++		}
++	}
 +	done := make(chan struct{})
 +	go func() {
 +		defer close(done)
@@ -518,8 +523,9 @@ index 0000000..0a63cf9
 +			return conversation
 +		}
 +	}
-+	if !strings.HasPrefix(channelID, "G") {
-+		return watchConversation{isDM: strings.HasPrefix(channelID, "D")}
++	// Group DMs can have C or G IDs, so only D IDs are known without a lookup.
++	if strings.HasPrefix(channelID, "D") {
++		return watchConversation{isDM: true}
 +	}
 +
 +	ctx, cancel := context.WithTimeout(h.ctx, 2*time.Second)
@@ -592,10 +598,10 @@ index 0000000..0a63cf9
 +func (*watchHandler) OnEmojiChanged(string, string, []string, string)             {}
 diff --git a/cmd/slk/watch_command_test.go b/cmd/slk/watch_command_test.go
 new file mode 100644
-index 0000000..57b083d
+index 0000000..d524a33
 --- /dev/null
 +++ b/cmd/slk/watch_command_test.go
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,151 @@
 +package main
 +
 +import (
@@ -620,20 +626,27 @@ index 0000000..57b083d
 +	handler.conversationInfo = func(_ context.Context, id string) (*slack.Channel, error) {
 +		lookedUp = append(lookedUp, id)
 +		return &slack.Channel{GroupConversation: slack.GroupConversation{
-+			Conversation: slack.Conversation{ID: id, IsMpIM: id == "GDM"}, Name: id,
++			Conversation: slack.Conversation{ID: id, IsMpIM: id == "GDM" || id == "CDM"}, Name: id,
 +		}}, nil
 +	}
 +	blocks := slack.Blocks{BlockSet: []slack.Block{slack.NewSectionBlock(
 +		slack.NewTextBlockObject("mrkdwn", "review requested", false, false), nil, nil,
 +	)}}
++	handler.OnConversationOpened(slack.Channel{GroupConversation: slack.GroupConversation{
++		Conversation: slack.Conversation{ID: "CJOINED", IsMpIM: true}, Name: "CJOINED",
++	}})
 +	handler.OnMessage("GDM", "", "1795427870.099969", "", "1795427800.001234", "bot_message", false, false, nil, blocks, nil, "B1", "GitHub")
 +	handler.OnMessage("GDM", "U1", "1795427871.000001", "ordinary", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
 +	handler.OnMessage("GPRIVATE", "U1", "1795427872.000001", "<@U2> see this", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("CDM", "U1", "1795427872.000002", "group", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("CJOINED", "U1", "1795427872.000003", "joined group", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("CPUBLIC", "U1", "1795427872.000004", "channel", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("CPUBLIC", "U1", "1795427872.000005", "channel again", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
 +	handler.OnMessage("D1", "U1", "1795427873.000001", "direct", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
 +	handler.OnMessage("D1", "U1", "1795427873.000001", "edited", "", "", true, true, nil, slack.Blocks{}, nil, "", "")
 +	handler.OnReactionAdded("D1", "1795427873.000001", "U1", "eyes")
 +
-+	if !reflect.DeepEqual(lookedUp, []string{"GDM", "GPRIVATE"}) {
++	if !reflect.DeepEqual(lookedUp, []string{"GDM", "GPRIVATE", "CDM", "CPUBLIC"}) {
 +		t.Fatalf("looked up %v", lookedUp)
 +	}
 +	var messages []recentMessage
@@ -644,7 +657,7 @@ index 0000000..57b083d
 +		}
 +		messages = append(messages, message)
 +	}
-+	if len(messages) != 4 {
++	if len(messages) != 8 {
 +		t.Fatalf("got %d messages", len(messages))
 +	}
 +	bot := messages[0]
@@ -652,7 +665,8 @@ index 0000000..57b083d
 +		bot.Text != "review requested" || !strings.Contains(bot.Permalink, "?thread_ts=1795427800.001234&cid=GDM") {
 +		t.Fatalf("unexpected bot message: %+v", bot)
 +	}
-+	if !messages[1].IsDM || messages[2].IsDM || messages[2].Text != "<@U2> see this" || !messages[3].IsDM {
++	if !messages[1].IsDM || messages[2].IsDM || messages[2].Text != "<@U2> see this" || !messages[3].IsDM ||
++		!messages[4].IsDM || messages[5].IsDM || messages[6].IsDM || !messages[7].IsDM {
 +		t.Fatalf("incorrect DM routing: %+v", messages)
 +	}
 +}
