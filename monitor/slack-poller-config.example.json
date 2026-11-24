@@ -14,8 +14,7 @@
   "slack_backend": "gabriel",
   "slk": {
     "binary": "./.slk-bin/slk",
-    "workspace": "",
-    "poll_interval_seconds": 30
+    "workspace": ""
   },
   "work_start": "09:00",
   "work_end": "19:00",

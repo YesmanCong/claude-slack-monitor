@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read Slack messages and push the ones worth triaging into this Claude Code session.
 
-This process can read from slack_source.mjs or poll slk's Activity feed. It filters, de-duplicates,
+This process can read from slack_source.mjs or stream events from slk's WebSocket. It filters, de-duplicates,
 batches and pushes incoming messages through the session inbox.
 Run it from inside the target session's Bash so it inherits CLAUDE_CODE_MESSAGING_SOCKET / _TOKEN.
 Settings page: http://127.0.0.1:8765
@@ -33,7 +33,6 @@ SEEN_TTL_SECONDS = 86400
 DEBOUNCE_SECONDS = 4
 MAX_BATCH = 20
 RESPAWN_DELAY_SECONDS = 5
-SLK_TIMEOUT_SECONDS = 60
 SLK_MIN_WINDOW_SECONDS = 600
 SLK_WINDOW_OVERLAP_SECONDS = 60
 PR_COMMITS_LIMIT = 250
@@ -66,7 +65,7 @@ DEFAULT_CONFIG = {
     "identity": {"my_user_id": "", "team_domain": "", "agent_reply_prefixes": ["[Claude]:"], "claude_app_user_id": ""},
     "notification_dms": {"github": "", "notion": "", "jira": ""},
     "slack_backend": "gabriel",
-    "slk": {"binary": "./.slk-bin/slk", "workspace": "", "poll_interval_seconds": 30},
+    "slk": {"binary": "./.slk-bin/slk", "workspace": ""},
     "work_start": "09:00",
     "work_end": "19:00",
     "weekdays": [1, 2, 3, 4, 5],
@@ -381,22 +380,26 @@ def slk_items(payload, cfg):
                 or not isinstance(text, str)):
             raise ValueError("slk recent 返回了无效的消息字段")
         kind = message.get("kind")
+        live = kind == "message"
+        mentioned = bool(my_user_id and re.search(r"<@" + re.escape(my_user_id) + r"(?:>|\|)", text))
         app = notification_dms.get(channel)
         if app:
             source = app
-        elif kind in ("dm", "bot_dm_bundle") or (kind == "thread_v2" and channel.startswith("D")):
+        elif (kind in ("dm", "bot_dm_bundle") or (kind == "thread_v2" and channel.startswith("D"))
+              or (live and (channel.startswith("D") or message.get("is_dm") is True))):
             source = "dm"
-        elif kind in ("at_user", "unjoined_channel_mention") or (
-                kind == "thread_v2" and re.search(r"<@" + re.escape(my_user_id) + r"(?:>|\|)", text)):
+        elif kind in ("at_user", "unjoined_channel_mention") or (kind in ("thread_v2", "message") and mentioned):
             source = "mention"
         else:
             continue
         user = message.get("author_id")
-        if user == my_user_id:
+        if user == my_user_id and not (live and mentioned):
             continue
+        channel_name = {"github": "DM: GitHub", "notion": "DM: Notion", "jira": "DM: Jira"}.get(app)
         items.append({"source": source, "channel_id": channel,
-                      "channel_name": {"github": "DM: GitHub", "notion": "DM: Notion", "jira": "DM: Jira"}.get(app, channel),
-                      "user_id": user, "user_name": user, "is_bot": message.get("is_bot") is True,
+                      "channel_name": channel_name or message.get("channel_name") or channel,
+                      "user_id": user, "user_name": message.get("author_name") or user,
+                      "is_bot": message.get("is_bot") is True,
                       "ts": ts, "thread_ts": message.get("thread_ts"),
                       "text": text, "permalink": message.get("permalink")})
     return sorted(items, key=lambda item: float(item["ts"]))
@@ -407,46 +410,108 @@ def slk_settings(cfg):
     if not isinstance(opts, dict):
         raise ValueError("slk 配置必须是 JSON 对象")
     opts = {**DEFAULT_CONFIG["slk"], **opts}
-    interval = opts["poll_interval_seconds"]
-    if type(interval) is not int or not 15 <= interval <= 300:
-        raise ValueError("slk.poll_interval_seconds 必须是 15 到 300 的整数")
     if not isinstance(opts["binary"], str) or not opts["binary"] or not isinstance(opts["workspace"], str):
         raise ValueError("slk.binary 和 slk.workspace 必须是字符串")
     return opts
 
 
-def poll_slk(cfg, opts, last_polled_at):
-    now = time.time()
-    within = SLK_MIN_WINDOW_SECONDS
-    if last_polled_at:
-        within = max(within, now - last_polled_at + SLK_WINDOW_OVERLAP_SECONDS)
-    within = min(within, now - workdays_ago_epoch(cfg["max_age_workdays"], dt.datetime.now()))
-    command = [opts["binary"], "recent", "--within", f"{int(within)}s"]
+def slk_watch_command(cfg, opts):
+    now = dt.datetime.now()
+    with file_lock:
+        state = load_json(STATE_PATH, {})
+    checkpoints = state.get("slk_checkpoints", {})
+    last_seen = checkpoints.get(opts["workspace"]) if checkpoints else state.get("slk_polled_at")
+    since = now.timestamp() - SLK_MIN_WINDOW_SECONDS
+    if isinstance(last_seen, (int, float)) and 0 < last_seen <= now.timestamp():
+        since = min(since, last_seen - SLK_WINDOW_OVERLAP_SECONDS)
+    since = max(since, workdays_ago_epoch(cfg["max_age_workdays"], now))
+    command = [opts["binary"], "watch", "--since", str(int(since))]
     if opts["workspace"]:
         command.extend(["--workspace", opts["workspace"]])
+    return command
+
+
+def save_slk_checkpoint(workspace, through):
+    through = min(through, time.time())
+    with file_lock:
+        state = load_json(STATE_PATH, {})
+        checkpoints = state.setdefault("slk_checkpoints", {})
+        if through > checkpoints.get(workspace, 0):
+            checkpoints[workspace] = through
+            save_json(STATE_PATH, state)
+
+
+SLK_SOURCE_ERRORS = {
+    "no_workspace": "slk workspace 未配置，请运行 slk --list-workspaces 核对。",
+    "auth_failed": "slk 无法验证 workspace 登录，请在终端运行 slk watch 检查。",
+}
+
+
+def consume_slk(proc, cfg, workspace):
+    failures = 0
+    caught_up = False
+    for line in proc.stdout:
+        if restart_source.is_set():
+            return
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(message, dict):
+            continue
+        event = message.get("__event__")
+        if event == "connected":
+            failures = 0
+            caught_up = False
+            status.update(state="connected", needs_login=False, last_error=None)
+        elif event == "disconnected":
+            failures += 1
+            if caught_up:
+                save_slk_checkpoint(workspace, time.time())
+            caught_up = False
+            status.update(state="connecting", last_error="slk WebSocket 断开，正在重连")
+            if failures == 3:
+                try:
+                    push_to_session("[slack-poller] slk WebSocket 连续 3 次连接失败，正在重连。")
+                except (OSError, KeyError):
+                    pass
+        elif event == "caught_up":
+            through = message.get("through")
+            if status["state"] == "connected" and type(through) is int and through > 0:
+                caught_up = True
+                save_slk_checkpoint(workspace, through)
+        elif event == "catchup_error":
+            caught_up = False
+            status["last_error"] = "slk Activity 补拉不完整，WebSocket 仍在接收新消息"
+        elif event == "error":
+            status["last_error"] = SLK_SOURCE_ERRORS.get(message.get("code"), "slk WebSocket 读取失败")
+        elif event is None:
+            try:
+                items = slk_items([message], cfg)
+            except ValueError:
+                continue
+            if items:
+                item = items[0]
+                accept_item(item)
+                if caught_up and message.get("kind") == "message":
+                    save_slk_checkpoint(workspace, float(item["ts"]))
+
+
+def stream_slk(cfg):
+    opts = slk_settings(cfg)
     env = {key: value for key, value in os.environ.items()
            if key not in ("SLK_DEBUG", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")}
-    with subprocess.Popen(command, cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    status.update(state="connecting", needs_login=False, last_error=None)
+    with subprocess.Popen(slk_watch_command(cfg, opts), cwd=HERE, env=env, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                           text=True, encoding="utf-8", errors="replace") as proc:
         current_proc[0] = proc
         try:
-            if restart_source.is_set():
-                return None
-            output, error = proc.communicate(timeout=SLK_TIMEOUT_SECONDS)
+            if not restart_source.is_set():
+                consume_slk(proc, cfg, opts["workspace"])
         finally:
             stop_source()
             current_proc[0] = None
-    if restart_source.is_set():
-        return None
-    if proc.returncode:
-        if "no workspaces configured" in error or "workspace" in error and "not found" in error:
-            raise ValueError("slk workspace 未配置。用所配置的 slk 二进制运行 --list-workspaces 核对。")
-        raise ValueError("slk recent 查询失败。请在终端用相同的 workspace 单独运行 slk recent 核对。")
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        raise ValueError("slk recent 未返回有效 JSON。请检查是否使用了 README 中构建的 slk。") from None
-    return slk_items(payload, cfg)
 
 
 def source_loop():
@@ -457,44 +522,24 @@ def source_loop():
             cfg = load_json(CONFIG_PATH, DEFAULT_CONFIG)
         backend = cfg["slack_backend"]
         if backend == "slk":
-            interval = DEFAULT_CONFIG["slk"]["poll_interval_seconds"]
-            if status["state"] != "connected":
-                status["state"] = "connecting"
-            error = None
             try:
-                opts = slk_settings(cfg)
-                interval = opts["poll_interval_seconds"]
-                with file_lock:
-                    last_polled_at = load_json(STATE_PATH, {}).get("slk_polled_at")
-                started = time.time()
-                items = poll_slk(cfg, opts, last_polled_at)
+                stream_slk(cfg)
+                error = status["last_error"] or "slk watch 已退出，请确认已按 README 构建支持 watch 的版本"
             except ValueError as e:
                 error = str(e)
-            except subprocess.TimeoutExpired:
-                error = "slk recent 查询超时"
             except OSError:
                 error = "无法运行 slk，请检查 slk.binary"
-            if error:
-                failures += 1
-                status.update(state="error", needs_login=False, last_error=error)
-                if failures == 3:
-                    try:
-                        push_to_session(f"[slack-poller] slk 连续 3 次读取失败：{error} 恢复后会补拉断开期间的消息。")
-                    except Exception:
-                        pass
-            elif items is not None:
+            if restart_source.is_set():
                 failures = 0
-                status.update(state="connected", needs_login=False, last_error=None)
-                for item in items:
-                    if restart_source.is_set():
-                        break
-                    accept_item(item)
-                else:
-                    with file_lock:
-                        state = load_json(STATE_PATH, {})
-                        state["slk_polled_at"] = started
-                        save_json(STATE_PATH, state)
-            restart_source.wait(interval)
+                continue
+            failures += 1
+            status.update(state="error", needs_login=False, last_error=error)
+            if failures == 3:
+                try:
+                    push_to_session(f"[slack-poller] slk 实时源连续 3 次退出：{error}")
+                except (OSError, KeyError):
+                    pass
+            restart_source.wait(RESPAWN_DELAY_SECONDS)
             continue
         if backend != "gabriel":
             status.update(state="error", needs_login=False, last_error="slack_backend 只能是 gabriel 或 slk")

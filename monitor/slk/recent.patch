@@ -1,8 +1,8 @@
 diff --git a/cmd/slk/main.go b/cmd/slk/main.go
-index 3562dcf..85fb01e 100644
+index 3562dcf..2e9c96d 100644
 --- a/cmd/slk/main.go
 +++ b/cmd/slk/main.go
-@@ -105,6 +105,12 @@ func main() {
+@@ -105,6 +105,18 @@ func main() {
  				os.Exit(1)
  			}
  			os.Exit(0)
@@ -12,23 +12,30 @@ index 3562dcf..85fb01e 100644
 +				os.Exit(1)
 +			}
 +			return
++		case "watch":
++			if err := runWatch(os.Args[2:]); err != nil {
++				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
++				os.Exit(1)
++			}
++			return
  		case "export":
  			if err := exportChannel(os.Args[2:]); err != nil {
  				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-@@ -192,6 +198,7 @@ Usage:
+@@ -192,6 +204,8 @@ Usage:
    slk --remove-workspace  Remove a configured workspace (interactive)
    slk --list-workspaces   List configured workspaces (TeamID, Slug, Name)
    slk --dump-sections     Dump raw users.channelSections.list JSON (diagnostic)
 +  slk recent [flags]      Read recent direct messages, mentions and thread replies
++  slk watch [flags]       Stream new messages as JSON lines
    slk export [flags]      Export a channel's messages and threads to Markdown
                            (see 'slk export --help')
    slk --version          Print version and exit
 diff --git a/cmd/slk/recent_command.go b/cmd/slk/recent_command.go
 new file mode 100644
-index 0000000..d3cd815
+index 0000000..2c5e6ac
 --- /dev/null
 +++ b/cmd/slk/recent_command.go
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,172 @@
 +package main
 +
 +import (
@@ -52,14 +59,17 @@ index 0000000..d3cd815
 +)
 +
 +type recentMessage struct {
-+	Kind      string `json:"kind"`
-+	ChannelID string `json:"channel_id"`
-+	TS        string `json:"ts"`
-+	ThreadTS  string `json:"thread_ts,omitempty"`
-+	AuthorID  string `json:"author_id"`
-+	IsBot     bool   `json:"is_bot"`
-+	Text      string `json:"text"`
-+	Permalink string `json:"permalink,omitempty"`
++	Kind        string `json:"kind"`
++	ChannelID   string `json:"channel_id"`
++	ChannelName string `json:"channel_name,omitempty"`
++	TS          string `json:"ts"`
++	ThreadTS    string `json:"thread_ts,omitempty"`
++	AuthorID    string `json:"author_id"`
++	AuthorName  string `json:"author_name,omitempty"`
++	IsBot       bool   `json:"is_bot"`
++	IsDM        bool   `json:"is_dm,omitempty"`
++	Text        string `json:"text"`
++	Permalink   string `json:"permalink,omitempty"`
 +}
 +
 +func runRecent(args []string) error {
@@ -76,13 +86,7 @@ index 0000000..d3cd815
 +		return errors.New("expected only flags and a positive --within duration")
 +	}
 +
-+	store := slackclient.NewTokenStore(filepath.Join(xdgData(), "tokens"))
-+	tokens, err := store.List()
-+	if err != nil {
-+		return fmt.Errorf("list workspaces: %w", err)
-+	}
-+	cfg, _ := config.Load(filepath.Join(xdgConfig(), "config.toml"))
-+	selected, err := selectExportToken(config.OrderTokens(tokens, cfg), *workspace)
++	selected, err := activityWorkspace(*workspace)
 +	if err != nil {
 +		return err
 +	}
@@ -96,16 +100,37 @@ index 0000000..d3cd815
 +		return err
 +	}
 +	end := time.Now().Truncate(time.Second)
-+	items, err := recentActivity(end.Add(-*window), end, func(cursor string) (slackclient.ActivityFeedResult, error) {
++	messages, unavailable, err := readRecentMessages(ctx, client, end.Add(-*window), end)
++	if err != nil {
++		return err
++	}
++	if unavailable > 0 {
++		fmt.Fprintf(os.Stderr, "skipped %d unavailable activity messages\n", unavailable)
++	}
++	return json.NewEncoder(os.Stdout).Encode(messages)
++}
++
++func activityWorkspace(workspace string) (slackclient.Token, error) {
++	store := slackclient.NewTokenStore(filepath.Join(xdgData(), "tokens"))
++	tokens, err := store.List()
++	if err != nil {
++		return slackclient.Token{}, fmt.Errorf("list workspaces: %w", err)
++	}
++	cfg, _ := config.Load(filepath.Join(xdgConfig(), "config.toml"))
++	return selectExportToken(config.OrderTokens(tokens, cfg), workspace)
++}
++
++func readRecentMessages(ctx context.Context, client *slackclient.Client, start, end time.Time) ([]recentMessage, int, error) {
++	items, err := recentActivity(start, end, func(cursor string) (slackclient.ActivityFeedResult, error) {
 +		return client.GetActivityFeed(ctx, 40, cursor, false)
 +	})
 +	if err != nil {
-+		return err
++		return nil, 0, err
 +	}
 +
 +	messages := make([]recentMessage, 0, len(items))
 +	if len(items) == 0 {
-+		return json.NewEncoder(os.Stdout).Encode(messages)
++		return messages, 0, nil
 +	}
 +	refs := make(map[string][]string)
 +	for _, item := range items {
@@ -113,7 +138,7 @@ index 0000000..d3cd815
 +	}
 +	bodies, err := client.GetActivityMessages(ctx, refs)
 +	if err != nil {
-+		return err
++		return nil, 0, err
 +	}
 +	unavailable := 0
 +	workspaceURL := "https://" + client.TeamSubdomain() + ".slack.com"
@@ -132,19 +157,14 @@ index 0000000..d3cd815
 +		}
 +		link, ok := slackurl.Build(workspaceURL, ids.ChannelID(item.ChannelID), ids.MessageTS(item.TS), ids.ThreadTS(item.ThreadTS))
 +		if !ok {
-+			link, err = client.GetPermalink(ctx, item.ChannelID, item.TS, item.ThreadTS)
-+			if err != nil {
-+				fmt.Fprintf(os.Stderr, "could not resolve permalink for %s at %s\n", item.ChannelID, item.TS)
-+			}
++			link, _ = client.GetPermalink(ctx, item.ChannelID, item.TS, item.ThreadTS)
 +		}
 +		messages = append(messages, recentMessage{Kind: item.Type, ChannelID: item.ChannelID,
 +			TS: item.TS, ThreadTS: item.ThreadTS, AuthorID: author,
-+			IsBot: item.IsBot || item.Type == "bot_dm_bundle", Text: body.Text, Permalink: link})
++			IsBot: item.IsBot || item.Type == "bot_dm_bundle", IsDM: item.Type == "dm" || item.Type == "bot_dm_bundle",
++			Text: body.Text, Permalink: link})
 +	}
-+	if unavailable > 0 {
-+		fmt.Fprintf(os.Stderr, "skipped %d unavailable activity messages\n", unavailable)
-+	}
-+	return json.NewEncoder(os.Stdout).Encode(messages)
++	return messages, unavailable, nil
 +}
 +
 +func recentActivity(start, end time.Time, fetch func(string) (slackclient.ActivityFeedResult, error)) ([]core.ActivityItem, error) {
@@ -227,5 +247,495 @@ index 0000000..d66da89
 +	}
 +	if want := []core.ActivityItem{direct, reply, mention}; !reflect.DeepEqual(items, want) {
 +		t.Fatalf("got %+v, want %+v", items, want)
++	}
++}
+diff --git a/cmd/slk/watch_command.go b/cmd/slk/watch_command.go
+new file mode 100644
+index 0000000..0a63cf9
+--- /dev/null
++++ b/cmd/slk/watch_command.go
+@@ -0,0 +1,335 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"flag"
++	"os"
++	"os/signal"
++	"strings"
++	"sync"
++	"syscall"
++	"time"
++
++	"github.com/gammons/slk/internal/core"
++	"github.com/gammons/slk/internal/ids"
++	slackclient "github.com/gammons/slk/internal/slack"
++	"github.com/gammons/slk/internal/slackurl"
++	"github.com/gammons/slk/internal/ui/messages/blockkit"
++	"github.com/slack-go/slack"
++)
++
++type watchEvent struct {
++	Event   string `json:"__event__"`
++	Code    string `json:"code,omitempty"`
++	Through int64  `json:"through,omitempty"`
++}
++
++type watchSession struct {
++	id          uint64
++	through     time.Time
++	resumeSince time.Time
++}
++
++type watchOutput struct {
++	mu          sync.Mutex
++	encoder     *json.Encoder
++	cancel      context.CancelFunc
++	err         error
++	session     uint64
++	connected   bool
++	recovered   bool
++	resumeSince time.Time
++}
++
++func (s *watchOutput) emitLocked(row any) {
++	if s.err == nil {
++		if s.err = s.encoder.Encode(row); s.err != nil {
++			s.cancel()
++		}
++	}
++}
++
++func (s *watchOutput) emit(row any) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.emitLocked(row)
++}
++
++func (s *watchOutput) connect(through time.Time) watchSession {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.session++
++	s.connected = true
++	s.recovered = false
++	s.emitLocked(watchEvent{Event: "connected"})
++	return watchSession{id: s.session, through: through, resumeSince: s.resumeSince}
++}
++
++func (s *watchOutput) disconnect(at time.Time) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.connected && s.recovered {
++		// Upstream can take a minute to detect a silently dropped socket.
++		// Recover that overlap and any time since, without replaying the
++		// full lifetime of a socket whose initial gap was recovered.
++		if since := at.Add(-time.Minute); since.After(s.resumeSince) {
++			s.resumeSince = since
++		}
++	}
++	s.connected = false
++	s.emitLocked(watchEvent{Event: "disconnected"})
++}
++
++func (s *watchOutput) emitForSession(session watchSession, event watchEvent) bool {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if !s.connected || s.session != session.id {
++		return false
++	}
++	s.emitLocked(event)
++	if s.err == nil && event.Event == "caught_up" {
++		s.recovered = true
++	}
++	return s.err == nil
++}
++
++func (s *watchOutput) writeError() error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	return s.err
++}
++
++func runWatch(args []string) error {
++	flags := flag.NewFlagSet("slk watch", flag.ContinueOnError)
++	workspace := flags.String("workspace", "", "configured workspace slug, ID, or name")
++	since := flags.Int64("since", 0, "catch up from a Unix timestamp in seconds (defaults to ten minutes ago)")
++	if err := flags.Parse(args); err != nil {
++		if errors.Is(err, flag.ErrHelp) {
++			return nil
++		}
++		return err
++	}
++	if flags.NArg() != 0 || *since < 0 || *since > time.Now().Unix() {
++		return errors.New("expected only flags and a valid --since Unix timestamp")
++	}
++
++	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
++	defer stop()
++	ctx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	output := &watchOutput{encoder: json.NewEncoder(os.Stdout), cancel: cancel}
++	selected, err := activityWorkspace(*workspace)
++	if err != nil {
++		output.emit(watchEvent{Event: "error", Code: "no_workspace"})
++		return errors.New("unable to select a configured Slack workspace")
++	}
++	client := slackclient.NewClient(selected.AccessToken, selected.Cookie)
++	if err := client.Connect(ctx); err != nil {
++		output.emit(watchEvent{Event: "error", Code: "auth_failed"})
++		return errors.New("unable to authenticate the configured Slack workspace")
++	}
++
++	start := time.Unix(*since, 0)
++	if *since == 0 {
++		start = time.Now().Truncate(time.Second).Add(-10 * time.Minute)
++	}
++	handler := &watchHandler{
++		ctx: ctx, output: output, recovery: make(chan watchSession, 1),
++		workspaceURL:     "https://" + client.TeamSubdomain() + ".slack.com",
++		conversations:    make(map[string]watchConversation),
++		conversationInfo: client.GetConversationInfo,
++	}
++	done := make(chan struct{})
++	go func() {
++		defer close(done)
++		runWatchCatchup(ctx, output, handler.recovery, start,
++			func(ctx context.Context, start, end time.Time) ([]recentMessage, int, error) {
++				return readRecentMessages(ctx, client, start, end)
++			})
++	}()
++	slackclient.NewConnectionManager(client, handler).Run(ctx)
++	cancel()
++	<-done
++	return output.writeError()
++}
++
++type watchCatchupReader func(context.Context, time.Time, time.Time) ([]recentMessage, int, error)
++
++func runWatchCatchup(ctx context.Context, output *watchOutput, recovery <-chan watchSession, start time.Time, read watchCatchupReader) {
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case session, open := <-recovery:
++			if !open {
++				return
++			}
++			since := start
++			if session.resumeSince.After(since) {
++				since = session.resumeSince
++			}
++			if session.through.Before(since) {
++				continue
++			}
++			request, cancel := context.WithTimeout(ctx, 45*time.Second)
++			messages, unavailable, err := read(request, since, session.through)
++			cancel()
++			if ctx.Err() != nil {
++				return
++			}
++			for i := len(messages) - 1; i >= 0; i-- {
++				output.emit(messages[i])
++			}
++			if err != nil || unavailable > 0 {
++				output.emitForSession(session, watchEvent{Event: "catchup_error"})
++				continue
++			}
++			if output.emitForSession(session, watchEvent{Event: "caught_up", Through: session.through.Unix()}) {
++				start = session.through
++			}
++		}
++	}
++}
++
++type watchConversation struct {
++	name       string
++	isDM       bool
++	retryAfter time.Time
++}
++
++type watchHandler struct {
++	ctx              context.Context
++	output           *watchOutput
++	recovery         chan watchSession
++	workspaceURL     string
++	conversations    map[string]watchConversation
++	conversationInfo func(context.Context, string) (*slack.Channel, error)
++}
++
++var _ slackclient.EventHandler = (*watchHandler)(nil)
++
++func (h *watchHandler) OnConnect() {
++	session := h.output.connect(time.Now().Truncate(time.Second))
++	select {
++	case h.recovery <- session:
++	default:
++		// The fetch worker may still be processing an earlier connection.
++		// Its watermark covers the gap through the latest queued session.
++		select {
++		case <-h.recovery:
++		default:
++		}
++		h.recovery <- session
++	}
++}
++
++func (h *watchHandler) OnDisconnect() {
++	h.output.disconnect(time.Now().Truncate(time.Second))
++}
++
++func (h *watchHandler) OnMessage(channelID, userID, ts, text, threadTS, subtype string, changed, _ bool, files []slack.File, blocks slack.Blocks, attachments []slack.Attachment, botID, username string) {
++	if changed || core.IsSystemNoticeSubtype(subtype) || channelID == "" || ts == "" {
++		return
++	}
++	conversation := h.conversation(channelID)
++	link, _ := slackurl.Build(h.workspaceURL, ids.ChannelID(channelID), ids.MessageTS(ts), ids.ThreadTS(threadTS))
++	authorID := userID
++	if authorID == "" {
++		authorID = botID
++	}
++	if text == "" {
++		text = watchFallbackText(blocks, attachments, files)
++	}
++	h.output.emit(recentMessage{
++		Kind: "message", ChannelID: channelID, ChannelName: conversation.name, TS: ts, ThreadTS: threadTS,
++		AuthorID: authorID, AuthorName: username, IsBot: botID != "" || subtype == "bot_message",
++		IsDM: conversation.isDM, Text: text, Permalink: link,
++	})
++}
++
++func (h *watchHandler) OnConversationOpened(ch slack.Channel) {
++	if ch.ID != "" {
++		h.conversations[ch.ID] = watchConversation{name: ch.Name, isDM: ch.IsIM || ch.IsMpIM || strings.HasPrefix(ch.ID, "D")}
++	}
++}
++
++func (h *watchHandler) conversation(channelID string) watchConversation {
++	if conversation, found := h.conversations[channelID]; found {
++		if conversation.retryAfter.IsZero() || time.Now().Before(conversation.retryAfter) {
++			return conversation
++		}
++	}
++	if !strings.HasPrefix(channelID, "G") {
++		return watchConversation{isDM: strings.HasPrefix(channelID, "D")}
++	}
++
++	ctx, cancel := context.WithTimeout(h.ctx, 2*time.Second)
++	defer cancel()
++	conversation, err := h.conversationInfo(ctx, channelID)
++	if err == nil && conversation != nil && conversation.ID == channelID {
++		h.OnConversationOpened(*conversation)
++	} else {
++		h.conversations[channelID] = watchConversation{retryAfter: time.Now().Add(time.Minute)}
++	}
++	return h.conversations[channelID]
++}
++
++func watchFallbackText(blocks slack.Blocks, attachments []slack.Attachment, files []slack.File) string {
++	var text []string
++	appendBlocks := func(blocks slack.Blocks) {
++		for _, block := range blockkit.Parse(blocks) {
++			switch b := block.(type) {
++			case blockkit.RichTextBlock:
++				text = append(text, blockkit.RichTextToMrkdwn(b))
++			case blockkit.HeaderBlock:
++				text = append(text, b.Text)
++			case blockkit.SectionBlock:
++				text = append(text, b.Text)
++				text = append(text, b.Fields...)
++			}
++		}
++	}
++	appendBlocks(blocks)
++	for _, attachment := range attachments {
++		if attachment.Text != "" {
++			text = append(text, attachment.Text)
++		} else {
++			text = append(text, attachment.Fallback)
++		}
++		appendBlocks(attachment.Blocks)
++	}
++	for _, file := range files {
++		text = append(text, file.Title)
++	}
++	return strings.TrimSpace(strings.Join(text, "\n"))
++}
++
++func (*watchHandler) OnEphemeralMessage(slackclient.EphemeralMessage)  {}
++func (*watchHandler) OnViewOpened(string)                              {}
++func (*watchHandler) OnMessageDeleted(string, string)                  {}
++func (*watchHandler) OnReactionAdded(string, string, string, string)   {}
++func (*watchHandler) OnReactionRemoved(string, string, string, string) {}
++func (*watchHandler) OnPresenceChange(string, string)                  {}
++func (*watchHandler) OnUserTyping(string, string)                      {}
++func (*watchHandler) OnAssistantStatus(slackclient.AssistantStatus)    {}
++func (*watchHandler) OnSelfPresenceChange(string)                      {}
++func (*watchHandler) OnDNDChange(bool, int64)                          {}
++func (*watchHandler) OnBadgeCountsUpdated(int)                         {}
++func (*watchHandler) OnChannelMarked(string, string, int, int)         {}
++func (*watchHandler) OnThreadMarked(string, string, string, slackclient.Subscribed) {
++}
++func (*watchHandler) OnThreadSubscriptionChanged(string, string, string, bool)    {}
++func (*watchHandler) OnChannelSectionUpserted(slackclient.ChannelSectionUpserted) {}
++func (*watchHandler) OnChannelSectionDeleted(string)                              {}
++func (*watchHandler) OnChannelSectionChannelsUpserted(string, []string)           {}
++func (*watchHandler) OnChannelSectionChannelsRemoved(string, []string)            {}
++func (*watchHandler) OnPrefChange(string, string)                                 {}
++func (*watchHandler) OnMemberJoined(string, string)                               {}
++func (*watchHandler) OnMemberLeft(string, string)                                 {}
++func (*watchHandler) OnUserStatusChange(string, slackclient.UserStatus)           {}
++func (*watchHandler) OnUserInvalidated(string)                                    {}
++func (*watchHandler) OnDNDInvalidated(string)                                     {}
++func (*watchHandler) OnUserDNDChange(string, bool, int64)                         {}
++func (*watchHandler) OnEmojiChanged(string, string, []string, string)             {}
+diff --git a/cmd/slk/watch_command_test.go b/cmd/slk/watch_command_test.go
+new file mode 100644
+index 0000000..57b083d
+--- /dev/null
++++ b/cmd/slk/watch_command_test.go
+@@ -0,0 +1,143 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"reflect"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/slack-go/slack"
++)
++
++func TestWatchMessageOutput(t *testing.T) {
++	var stdout bytes.Buffer
++	handler := watchHandler{
++		ctx: context.Background(), output: &watchOutput{encoder: json.NewEncoder(&stdout)},
++		workspaceURL: "https://test.slack.com", conversations: make(map[string]watchConversation),
++	}
++	var lookedUp []string
++	handler.conversationInfo = func(_ context.Context, id string) (*slack.Channel, error) {
++		lookedUp = append(lookedUp, id)
++		return &slack.Channel{GroupConversation: slack.GroupConversation{
++			Conversation: slack.Conversation{ID: id, IsMpIM: id == "GDM"}, Name: id,
++		}}, nil
++	}
++	blocks := slack.Blocks{BlockSet: []slack.Block{slack.NewSectionBlock(
++		slack.NewTextBlockObject("mrkdwn", "review requested", false, false), nil, nil,
++	)}}
++	handler.OnMessage("GDM", "", "1795427870.099969", "", "1795427800.001234", "bot_message", false, false, nil, blocks, nil, "B1", "GitHub")
++	handler.OnMessage("GDM", "U1", "1795427871.000001", "ordinary", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("GPRIVATE", "U1", "1795427872.000001", "<@U2> see this", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("D1", "U1", "1795427873.000001", "direct", "", "", false, false, nil, slack.Blocks{}, nil, "", "")
++	handler.OnMessage("D1", "U1", "1795427873.000001", "edited", "", "", true, true, nil, slack.Blocks{}, nil, "", "")
++	handler.OnReactionAdded("D1", "1795427873.000001", "U1", "eyes")
++
++	if !reflect.DeepEqual(lookedUp, []string{"GDM", "GPRIVATE"}) {
++		t.Fatalf("looked up %v", lookedUp)
++	}
++	var messages []recentMessage
++	for line := range strings.SplitSeq(strings.TrimSpace(stdout.String()), "\n") {
++		var message recentMessage
++		if err := json.Unmarshal([]byte(line), &message); err != nil {
++			t.Fatal(err)
++		}
++		messages = append(messages, message)
++	}
++	if len(messages) != 4 {
++		t.Fatalf("got %d messages", len(messages))
++	}
++	bot := messages[0]
++	if !bot.IsBot || !bot.IsDM || bot.AuthorID != "B1" || bot.AuthorName != "GitHub" ||
++		bot.Text != "review requested" || !strings.Contains(bot.Permalink, "?thread_ts=1795427800.001234&cid=GDM") {
++		t.Fatalf("unexpected bot message: %+v", bot)
++	}
++	if !messages[1].IsDM || messages[2].IsDM || messages[2].Text != "<@U2> see this" || !messages[3].IsDM {
++		t.Fatalf("incorrect DM routing: %+v", messages)
++	}
++}
++
++func TestWatchCatchupPreservesPartialWatermark(t *testing.T) {
++	var stdout bytes.Buffer
++	output := &watchOutput{encoder: json.NewEncoder(&stdout)}
++	first := output.connect(time.Unix(200, 0))
++	recovery := make(chan watchSession, 2)
++	recovery <- first
++	recovery <- watchSession{id: first.id, through: time.Unix(210, 0)}
++	close(recovery)
++	var starts, ends []int64
++	runWatchCatchup(context.Background(), output, recovery, time.Unix(100, 0),
++		func(_ context.Context, start, end time.Time) ([]recentMessage, int, error) {
++			starts = append(starts, start.Unix())
++			ends = append(ends, end.Unix())
++			if end.Unix() == 200 {
++				return []recentMessage{{Text: "available despite partial response"}}, 1, nil
++			}
++			return []recentMessage{{Text: "recovered"}}, 0, nil
++		})
++	if !reflect.DeepEqual(starts, []int64{100, 100}) || !reflect.DeepEqual(ends, []int64{200, 210}) {
++		t.Fatalf("incorrect windows: %v to %v", starts, ends)
++	}
++	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
++	if len(lines) != 5 || !strings.Contains(lines[1], "available despite partial response") ||
++		lines[2] != `{"__event__":"catchup_error"}` || !strings.Contains(lines[3], "recovered") ||
++		lines[4] != `{"__event__":"caught_up","through":210}` {
++		t.Fatalf("unexpected output: %s", stdout.String())
++	}
++}
++
++func TestWatchDropsCatchupEventsFromPreviousConnections(t *testing.T) {
++	var stdout bytes.Buffer
++	output := &watchOutput{encoder: json.NewEncoder(&stdout)}
++	first := output.connect(time.Unix(200, 0))
++	output.disconnect(time.Unix(205, 0))
++	if output.emitForSession(first, watchEvent{Event: "caught_up", Through: 200}) {
++		t.Fatal("disconnected session accepted a checkpoint")
++	}
++	second := output.connect(time.Unix(210, 0))
++	if output.emitForSession(first, watchEvent{Event: "caught_up", Through: 200}) {
++		t.Fatal("superseded session accepted a checkpoint")
++	}
++	if !output.emitForSession(second, watchEvent{Event: "caught_up", Through: 210}) {
++		t.Fatal("current session rejected a checkpoint")
++	}
++	if got := stdout.String(); strings.Count(got, "caught_up") != 1 {
++		t.Fatalf("unexpected output: %s", got)
++	}
++}
++
++func TestWatchReconnectOnlySkipsPreviouslyRecoveredOnlineTime(t *testing.T) {
++	var stdout bytes.Buffer
++	output := &watchOutput{encoder: json.NewEncoder(&stdout)}
++	first := output.connect(time.Unix(200, 0))
++	output.emitForSession(first, watchEvent{Event: "caught_up", Through: 200})
++	output.disconnect(time.Unix(7200, 0))
++	second := output.connect(time.Unix(7210, 0))
++	if got := second.resumeSince.Unix(); got != 7140 {
++		t.Fatalf("resume since %d, want 7140", got)
++	}
++	output.emitForSession(second, watchEvent{Event: "catchup_error"})
++	output.disconnect(time.Unix(18000, 0))
++	third := output.connect(time.Unix(18010, 0))
++	if got := third.resumeSince; got != second.resumeSince {
++		t.Fatalf("advanced over an unrecovered gap to %v", got)
++	}
++
++	recovery := make(chan watchSession, 1)
++	recovery <- third
++	close(recovery)
++	runWatchCatchup(context.Background(), output, recovery, time.Unix(200, 0),
++		func(_ context.Context, start, end time.Time) ([]recentMessage, int, error) {
++			if start != third.resumeSince || end != third.through {
++				t.Fatalf("unexpected recovery window %v to %v", start, end)
++			}
++			return []recentMessage{{Text: "newer"}, {Text: "older"}}, 0, nil
++		})
++	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
++	if len(lines) < 3 || !strings.Contains(lines[len(lines)-3], "older") || !strings.Contains(lines[len(lines)-2], "newer") ||
++		lines[len(lines)-1] != `{"__event__":"caught_up","through":18010}` {
++		t.Fatalf("unexpected catchup order: %s", stdout.String())
 +	}
 +}
