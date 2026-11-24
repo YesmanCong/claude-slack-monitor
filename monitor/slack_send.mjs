@@ -5,14 +5,17 @@
 //   node slack_send.mjs --channel D0123ABCD [--thread ...] --file a.png [--file b.png] < body.md
 //     （正文发完再把文件传到同一个 channel / thread；--file 可重复，不能和 --update 一起用）
 // 成功时 stdout 打出 {"ts": ..., "permalink": ..., "files": [...]}；cookie 和令牌不出现在任何输出里。
-import { readFileSync, statSync } from "node:fs";
+// 每发成功或改成功一条，往 slack-activity-log.jsonl 追加一行，设置页「记录」读它。
+import { appendFileSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   defaultWebSocketFactory, guardedWebSocket, makeScrubber, readCookieFromKeychain, scrubbingLogger,
 } from "./slack_common.mjs";
 
 const DEFAULT_HEADER = "Auto-reply from agent";
+const ACTIVITY_LOG = new URL("./slack-activity-log.jsonl", import.meta.url);
 // markdown block 单块上限 12000 字符，超出就拆成几块。
 const MARKDOWN_BLOCK_MAX = 12000;
 const FILE_SIZE_MAX = 50 << 20;
@@ -30,7 +33,7 @@ function parseArgs(argv) {
     const [name, value] = [argv[i], argv[i + 1]];
     if (name === "--channel") args.channel = value;
     else if (name === "--thread") args.thread = value;
-    else if (name === "--update") args.update = value;
+    else if (name === "--update" || name === "--edit") args.update = value;
     else if (name === "--file") args.files.push(checkedFile(value));
     else throw new Error(`unknown argument ${name}`);
   }
@@ -74,9 +77,38 @@ async function uploadFile(core, file, channel, threadTs) {
   return { id: step1.file, filename: file.filename };
 }
 
-function buildMessage(body, prefix, header) {
+// markdown block 按 GFM 解析，裸 URL 前面紧挨着全角标点或中文时不会变成链接，统一包成 <url>。
+// 代码块、行内代码、已有的 <...> 和 [text](url) 原样保留。
+const CODE_SPAN = /(```[\s\S]*?```|`[^`\n]*`)/;
+const URL_OR_LINK = /<[^<>\n]*>|\[[^\]\n]*\]\([^)\s]*\)|https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/g;
+
+function trimUrlTail(url) {
+  let end = url.length;
+  for (;;) {
+    const ch = url[end - 1];
+    const head = url.slice(0, end);
+    if (".,;:!?'\"*_~".includes(ch)) end -= 1;
+    else if (ch === ")" && head.split("(").length < head.split(")").length) end -= 1;
+    else if (ch === "]" && head.split("[").length < head.split("]").length) end -= 1;
+    else return end;
+  }
+}
+
+export function linkifyBareUrls(body) {
+  return body
+    .split(CODE_SPAN)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(URL_OR_LINK, (m) => {
+      if (!m.startsWith("http")) return m;
+      const end = trimUrlTail(m);
+      return `<${m.slice(0, end)}>${m.slice(end)}`;
+    })))
+    .join("");
+}
+
+export function buildMessage(body, prefix, header) {
+  const markdown = linkifyBareUrls(body);
   const chunks = [];
-  for (let rest = body; rest.length > 0; rest = rest.slice(MARKDOWN_BLOCK_MAX)) chunks.push(rest.slice(0, MARKDOWN_BLOCK_MAX));
+  for (let rest = markdown; rest.length > 0; rest = rest.slice(MARKDOWN_BLOCK_MAX)) chunks.push(rest.slice(0, MARKDOWN_BLOCK_MAX));
   return {
     blocks: [
       { type: "context", elements: [{ type: "mrkdwn", text: header }] },
@@ -85,6 +117,29 @@ function buildMessage(body, prefix, header) {
     // 通知和监控读的是 text：开头保留代发前缀，监控靠它认出自己发的、不推回来。
     text: `${prefix} ${body}`,
   };
+}
+
+export function sentLogEntry(args, body, posted, permalink, now = new Date()) {
+  return {
+    at: new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 19),
+    type: "sent",
+    action: args.update ? "update" : "post",
+    channel_id: args.channel,
+    ...(args.thread ? { thread_ts: args.thread } : {}),
+    ts: posted.ts,
+    permalink,
+    body,
+    ...(args.files.length ? { files: args.files.map((f) => f.filename) } : {}),
+    ...(process.env.CLAUDE_CODE_SESSION_ID ? { session: process.env.CLAUDE_CODE_SESSION_ID } : {}),
+  };
+}
+
+function logSent(entry) {
+  try {
+    appendFileSync(ACTIVITY_LOG, JSON.stringify(entry) + "\n");
+  } catch (e) {
+    process.stderr.write(`slack_send: 消息已发出，但没记进 slack-activity-log.jsonl：${e.message}\n`);
+  }
 }
 
 async function main() {
@@ -117,16 +172,23 @@ async function main() {
         unfurl_links: false,
         ...(args.thread ? { thread_ts: args.thread } : {}),
       });
-    const link = await core.callWebApi("chat.getPermalink", { channel: args.channel, message_ts: posted.ts });
+    let permalink = null;
+    try {
+      permalink = (await core.callWebApi("chat.getPermalink", { channel: args.channel, message_ts: posted.ts })).permalink;
+    } finally {
+      logSent(sentLogEntry(args, body, posted, permalink));
+    }
     const files = [];
     for (const file of args.files) files.push(await uploadFile(core, file, args.channel, args.thread));
-    process.stdout.write(JSON.stringify({ ts: posted.ts, permalink: link.permalink, ...(files.length ? { files } : {}) }) + "\n");
+    process.stdout.write(JSON.stringify({ ts: posted.ts, permalink, ...(files.length ? { files } : {}) }) + "\n");
   } finally {
     core.disconnect();
   }
 }
 
-main().catch((e) => {
-  process.stderr.write("slack_send: " + makeScrubber()(e instanceof Error ? e.message : String(e)) + "\n");
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((e) => {
+    process.stderr.write("slack_send: " + makeScrubber()(e instanceof Error ? e.message : String(e)) + "\n");
+    process.exit(1);
+  });
+}

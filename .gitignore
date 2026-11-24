@@ -7,6 +7,9 @@ __pycache__/
 monitor/slack-poller-config.json
 monitor/slack-poller-state.json
 monitor/slack-monitor-state.json
+monitor/slack-activity-log.jsonl
+monitor/slack-monitor-rules.md
+monitor/.slack-monitor-rules.snapshot
 monitor/.gabriel-state/
 monitor/.slk-bin/
 monitor/.claude/hooks/*.last
