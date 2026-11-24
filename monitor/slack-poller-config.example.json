@@ -1,13 +1,13 @@
 {
   "identity": {
-    "my_user_id": "U0123456789",
-    "team_domain": "your-workspace",
+    "my_user_id": "",
+    "team_domain": "",
     "agent_reply_prefixes": ["[Claude 😼]:", "[Claude :smirk_cat:]:"],
     "agent_reply_header": ":smirk_cat: Auto-reply from agent",
     "claude_app_user_id": ""
   },
   "notification_dms": {
-    "github": "D0123456789",
+    "github": "",
     "notion": "",
     "jira": ""
   },
@@ -38,11 +38,11 @@
     "secret": "refuse",
     "other": "ask"
   },
-  "user_whitelist": [],
   "user_blacklist": [],
-  "channel_whitelist": [],
   "channel_blacklist": [],
   "keyword_blacklist": [],
   "bot_failure_keywords": ["fail", "error", "SLA Miss", "timeout", "rollback"],
-  "release_branch_whitelist": ["release/main"]
+  "release_branch_whitelist": ["release/main"],
+  "approve_exceptions": [],
+  "approve_without_review": []
 }

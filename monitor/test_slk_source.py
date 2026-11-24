@@ -130,6 +130,7 @@ class SlkSourceTests(unittest.TestCase):
             poller.save_json(config_path, CONFIG)
             poller.save_json(state_path, {"seen": {duplicate: poller.time.time()}})
             with patch.multiple(poller, CONFIG_PATH=config_path, STATE_PATH=state_path,
+                                ACTIVITY_LOG_PATH=Path(directory) / "activity.jsonl",
                                 batch=[], recent=poller.deque(), status={}):
                 for item in (first, second, first, legacy):
                     poller.accept_item(item)
