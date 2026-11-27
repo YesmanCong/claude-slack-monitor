@@ -12,15 +12,26 @@ BOARD_PREFIX = "[待办看板]"
 TITLE_MAX = 80
 SUMMARY_MAX = 200
 KEPT_TASKS = 20
+# A turn shorter than this is a quick answer (small talk, a one-line reply): it never enters the list.
+QUICK_SECONDS = 90
 
 
 def name_sender(item):
+    # Slack display names carry a team suffix ("Alice Wang (ENG - BE)"); the name alone tells who it is.
+    name = re.sub(r"\s*\([^)]*\)\s*$", "", item.get("user_name") or "")
     channel = item.get("channel_name") or ""
-    return " · ".join(part for part in (item.get("user_name"), "" if channel.startswith("DM") else channel) if part) or "未知来源"
+    return " · ".join(part for part in (name, "" if channel.startswith("DM") else channel) if part) or "未知来源"
+
+
+def clean_text(text):
+    """Slack writes a link as <url|label> or <url>: keep the label, or the address without its scheme."""
+    text = re.sub(r"<https?://[^|>]+\|([^>]+)>", r"\1", text)
+    text = re.sub(r"<https?://([^>]+)>", r"\1", text)
+    return " ".join(text.split())
 
 
 def describe_task(prompt):
-    """Title, link and quietness of the task a prompt starts; None when the prompt is not a task."""
+    """Sender, title, link and quietness of the task a prompt starts; None when the prompt is not a task."""
     head, *rows = prompt.lstrip().split("\n")
     if head.startswith(BOARD_PREFIX):
         return {"title": head.removeprefix(BOARD_PREFIX).strip()[:TITLE_MAX], "quiet": False}
@@ -35,14 +46,14 @@ def describe_task(prompt):
         if isinstance(item, dict):
             items.append(item)
     if not items:
-        # A timed check carries no message rows ("[slack-poller] 10:30 跟进检查：…") and runs every few minutes, so it is shown while it runs and announced nowhere.
+        # A timed check carries no message rows ("[slack-poller] 10:30 跟进检查：…") and runs every few minutes, so it is announced nowhere and leaves the list when it ends.
         label = re.sub(r"^\d{2}:\d{2}\s*", "", head.removeprefix(POLLER_PREFIX).strip()).split("：")[0]
         return {"title": label[:TITLE_MAX], "quiet": True}
     if len(items) == 1:
-        title = f"{name_sender(items[0])}：{' '.join(str(items[0].get('text') or '').split())}"
+        sender, title = name_sender(items[0]), clean_text(str(items[0].get("text") or ""))
     else:
-        title = f"{len(items)} 条消息：{'、'.join(dict.fromkeys(name_sender(item) for item in items))}"
-    task = {"title": title[:TITLE_MAX], "quiet": False}
+        sender, title = f"{len(items)} 条消息", "、".join(dict.fromkeys(name_sender(item) for item in items))
+    task = {"sender": sender, "title": title[:TITLE_MAX], "quiet": False}
     permalink = str(items[0].get("permalink") or "")
     if permalink.startswith("https://"):
         task["permalink"] = permalink
@@ -50,11 +61,11 @@ def describe_task(prompt):
 
 
 def end_tasks(tasks, session_id, now, summary):
-    """Close what this session has running: a quiet task leaves the list, the others stay until the person removes them."""
+    """Close what this session has running: a quiet or a quick task leaves the list, the others stay until the person removes them."""
     ended = []
     for task in tasks:
         is_running = task.get("session_id") == session_id and "ended" not in task
-        if is_running and task.get("quiet"):
+        if is_running and (task.get("quiet") or now.timestamp() * 1000 < task.get("listed_from_ms", 0)):
             continue
         ended.append({**task, "ended": f"{now:%H:%M}", "summary": summary} if is_running else task)
     return ended
@@ -62,7 +73,8 @@ def end_tasks(tasks, session_id, now, summary):
 
 def start_task(tasks, described, session_id, now):
     """A new prompt means this session's earlier turn is over, so what it left running is closed first."""
-    started = {"id": f"{session_id}:{now:%Y%m%d%H%M%S}", "session_id": session_id, **described, "started": f"{now:%H:%M}"}
+    started = {"id": f"{session_id}:{now:%Y%m%d%H%M%S}", "session_id": session_id, **described, "started": f"{now:%H:%M}",
+               "listed_from_ms": int((now.timestamp() + QUICK_SECONDS) * 1000)}
     return [*end_tasks(tasks, session_id, now, ""), started][-KEPT_TASKS:]
 
 

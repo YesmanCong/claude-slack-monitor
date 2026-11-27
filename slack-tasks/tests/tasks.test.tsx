@@ -5,7 +5,8 @@ const TASKS_PATH = '/home/me/.claude/slack-tasks.json'
 const RUNNING = {
   id: 'monitor:1',
   session_id: 'monitor',
-  title: 'Alice · rc-dev：帮忙 review 一下 PR',
+  sender: 'Alice · rc-dev',
+  title: '帮忙 review 一下 PR',
   permalink: 'https://example.slack.com/archives/C1/p1',
   quiet: false,
   started: '10:53',
@@ -63,14 +64,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(notices).toEqual(['开始处理：Alice · rc-dev：帮忙 review 一下 PR'])
 
     const collapsed = await $.ui.mount({ ...BAND, surface })
-    expect((await collapsed.find({ type: 'Text', text: /Alice/ }))?.text).toBe(RUNNING.title)
+    expect((await collapsed.find({ type: 'Text', text: /review/ }))?.text).toBe(RUNNING.title)
     expect((await collapsed.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 1 · 已完成 0')
     await collapsed.press({ key: 'toggle' })
     await collapsed.unmount()
 
     const expanded = await $.ui.mount({ ...BAND, surface })
-    expect((await expanded.find({ type: 'Text', text: /开始$/ }))?.text).toBe('处理中 · 10:53 开始')
-    expect(await expanded.find({ type: 'Button', text: /移除/ })).toBeUndefined()
+    expect((await expanded.find({ type: 'Text', text: /^处理中 ·/ }))?.text).toBe('处理中 · 10:53')
+    expect(await expanded.find({ type: 'Text', text: /移除/ })).toBeUndefined()
     await expanded.unmount()
 
     files[TASKS_PATH] = JSON.stringify([ENDED])
@@ -114,4 +115,53 @@ test('tasks already in the file when a session starts are listed without an anno
   expect((await band.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 0 · 已完成 1')
   await band.unmount()
   expect([...toasts, ...notices]).toEqual([])
+})
+
+test('the expanded list shows five rows at a time, newest first, and clears what is finished', async ($, on) => {
+  mock.clock(on)
+  const { files } = mockEngine(on, 'monitor')
+  const ended = [1, 2, 3, 4, 5, 6].map(n => ({ ...ENDED, id: `monitor:${n}`, title: `第 ${n} 件` }))
+  files[TASKS_PATH] = JSON.stringify([...ended, { ...RUNNING, id: 'monitor:7', title: '第 7 件' }])
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const collapsed = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await collapsed.press({ key: 'toggle' })
+  await collapsed.unmount()
+
+  const top = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await top.find({ type: 'Text', text: /\/ 7$/ }))?.text).toBe('1–5 / 7')
+  expect(await top.find({ type: 'Text', text: /第 7 件/ })).toBeDefined()
+  expect(await top.find({ type: 'Text', text: /第 2 件/ })).toBeUndefined()
+  await top.press({ key: 'rows-down' })
+  await top.unmount()
+
+  const bottom = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await bottom.find({ type: 'Text', text: /\/ 7$/ }))?.text).toBe('3–7 / 7')
+  expect(await bottom.find({ type: 'Text', text: /第 1 件/ })).toBeDefined()
+  await bottom.press({ key: 'clear' })
+  await bottom.unmount()
+
+  expect(JSON.parse(files[TASKS_PATH] ?? '[]').map((task: { id: string }) => task.id)).toEqual(['monitor:7'])
+  const cleared = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await cleared.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 1 · 已完成 0')
+  await cleared.unmount()
+})
+
+test('a running task enters the list once it has outlasted a quick answer', async ($, on) => {
+  const clock = mock.clock(on)
+  const { files, toasts } = mockEngine(on, 'monitor')
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  files[TASKS_PATH] = JSON.stringify([{ ...RUNNING, listed_from_ms: 90_000 }])
+  await clock.advance(87_000)
+  const early = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await early.find({ type: 'Button' })).toBeUndefined()
+  await early.unmount()
+  expect(toasts).toEqual([])
+
+  await clock.advance(3000)
+  expect(toasts).toEqual(['开始处理：Alice · rc-dev：帮忙 review 一下 PR'])
+  const listed = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await listed.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 1 · 已完成 0')
+  await listed.unmount()
 })
