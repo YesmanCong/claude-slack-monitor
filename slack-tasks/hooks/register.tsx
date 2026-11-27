@@ -155,13 +155,16 @@ export const register: Register = on => {
               {task.title}
             </Text>
             <Box flexGrow={1} />
-            {task.ended === undefined ? (
-              <Text color="claude">处理中 · {task.started}</Text>
-            ) : (
+            {task.ended !== undefined ? (
               <Text dimColor>已完成 · {task.ended}</Text>
+            ) : task.handed_at !== undefined ? (
+              <Text color="claude">已转给别的会话 · {task.handed_at}</Text>
+            ) : (
+              <Text color="claude">处理中 · {task.started}</Text>
             )}
             {task.permalink !== undefined && <Link href={task.permalink} label="原文" />}
-            {task.ended !== undefined && (
+            {/* A task handed to a session that never reports back would stay open for good, so it can be removed by hand. */}
+            {(task.ended !== undefined || task.handed_at !== undefined) && (
               <Button key={`remove-${task.id}`} plain onPress={() => dropTasks($, one => one.id === task.id)}>
                 <Text dimColor>移除</Text>
               </Button>

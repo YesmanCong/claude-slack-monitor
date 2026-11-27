@@ -1,4 +1,4 @@
-"""UserPromptSubmit and Stop hook: keep the list of tasks the monitor session is working on. The slack-tasks mod draws it above the prompt."""
+"""UserPromptSubmit, PostToolUse and Stop hook: keep the list of tasks the monitor session is working on or has handed to another session. The slack-tasks mod draws it above the prompt."""
 import datetime as dt
 import json
 import os
@@ -9,6 +9,9 @@ from pathlib import Path
 TASKS_PATH = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "slack-tasks.json"
 POLLER_PREFIX = "[slack-poller]"
 BOARD_PREFIX = "[待办看板]"
+WORKER_ID = re.compile(r"local_[\w-]+")
+# How another session's message reaches this one.
+REPORT = re.compile(r'<cross-session-message from="(?P<worker>local_[\w-]+)"[^>]*>(?P<body>.*?)(?:</cross-session-message>|\Z)', re.S)
 TITLE_MAX = 80
 SUMMARY_MAX = 200
 KEPT_TASKS = 20
@@ -24,9 +27,11 @@ def name_sender(item):
 
 
 def clean_text(text):
-    """Slack writes a link as <url|label> or <url>: keep the label, or the address without its scheme."""
-    text = re.sub(r"<https?://[^|>]+\|([^>]+)>", r"\1", text)
+    """Slack writes links and mentions as <target|label> or <target>: keep the label, a bare address without its scheme, and drop a bare user or channel id, which names nobody."""
+    text = re.sub(r"<[^|>]+\|([^>]+)>", r"\1", text)
     text = re.sub(r"<https?://([^>]+)>", r"\1", text)
+    text = re.sub(r"<[@#][A-Z0-9]+>", "", text)
+    text = re.sub(r"<!(\w+)>", r"@\1", text)
     return " ".join(text.split())
 
 
@@ -61,14 +66,30 @@ def describe_task(prompt):
 
 
 def end_tasks(tasks, session_id, now, summary):
-    """Close what this session has running: a quiet or a quick task leaves the list, the others stay until the person removes them."""
+    """Close what this session has running and kept to itself: a quiet or a quick task leaves the list, the others stay until the person removes them. A task handed to another session stays open until that session reports back."""
     ended = []
     for task in tasks:
-        is_running = task.get("session_id") == session_id and "ended" not in task
+        is_running = task.get("session_id") == session_id and "ended" not in task and "handed_to" not in task
         if is_running and (task.get("quiet") or now.timestamp() * 1000 < task.get("listed_from_ms", 0)):
             continue
         ended.append({**task, "ended": f"{now:%H:%M}", "summary": summary} if is_running else task)
     return ended
+
+
+def hand_off(tasks, session_id, worker, now):
+    """The session passed its running work to `worker`: the task is finished when that session reports back, whenever this turn ends."""
+    return [{**task, "handed_to": [*task.get("handed_to", []), worker], "handed_at": task.get("handed_at") or f"{now:%H:%M}"}
+            if task.get("session_id") == session_id and "ended" not in task and worker not in task.get("handed_to", []) else task
+            for task in tasks]
+
+
+def report_back(tasks, worker, now, summary):
+    """`worker` sent its report: every open task handed to it is finished.
+
+    shortcut: a session holding two tasks closes both with its first report; record which message started which task if that shows up.
+    """
+    return [{**task, "ended": f"{now:%H:%M}", "summary": summary} if "ended" not in task and worker in task.get("handed_to", []) else task
+            for task in tasks]
 
 
 def start_task(tasks, described, session_id, now):
@@ -88,11 +109,21 @@ def main():
         tasks = []
     if not isinstance(tasks, list):
         tasks = []
-    if payload.get("hook_event_name") == "Stop":
+    event = payload.get("hook_event_name")
+    if event == "Stop":
         updated = end_tasks(tasks, session_id, now, str(payload.get("last_assistant_message") or "").strip()[:SUMMARY_MAX])
+    elif event == "PostToolUse":
+        tool_input = payload.get("tool_input") or {}
+        worker = str(tool_input.get("to") or tool_input.get("session_id") or "")
+        updated = hand_off(tasks, session_id, worker, now) if WORKER_ID.fullmatch(worker) else tasks
     else:
-        described = describe_task(str(payload.get("prompt") or ""))
-        updated = start_task(tasks, described, session_id, now) if described else tasks
+        prompt = str(payload.get("prompt") or "")
+        report = REPORT.search(prompt)
+        described = None if report else describe_task(prompt)
+        if report:
+            updated = report_back(tasks, report["worker"], now, " ".join(report["body"].split())[:SUMMARY_MAX])
+        else:
+            updated = start_task(tasks, described, session_id, now) if described else tasks
     if updated != tasks:
         # The mod reads this file every few seconds; replacing it whole keeps a half-written list out of its sight.
         draft = TASKS_PATH.with_suffix(".json.tmp")

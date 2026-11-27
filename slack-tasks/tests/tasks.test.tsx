@@ -165,3 +165,21 @@ test('a running task enters the list once it has outlasted a quick answer', asyn
   expect((await listed.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 1 · 已完成 0')
   await listed.unmount()
 })
+
+test('a task handed to another session stays open, says so, and can be removed by hand', async ($, on) => {
+  mock.clock(on)
+  const { files } = mockEngine(on, 'monitor')
+  files[TASKS_PATH] = JSON.stringify([{ ...RUNNING, handed_to: ['local_worker'], handed_at: '10:54' }])
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const collapsed = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await collapsed.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 1 · 已完成 0')
+  await collapsed.press({ key: 'toggle' })
+  await collapsed.unmount()
+
+  const expanded = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await expanded.find({ type: 'Text', text: /^已转给/ }))?.text).toBe('已转给别的会话 · 10:54')
+  await expanded.press({ key: 'remove-monitor:1' })
+  await expanded.unmount()
+  expect(files[TASKS_PATH]).toBe('[]')
+})

@@ -8,6 +8,7 @@ export type SlackTask = {
   quiet: boolean
   started: string
   listed_from_ms?: number
+  handed_at?: string
   ended?: string
   summary?: string
 }
