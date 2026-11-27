@@ -147,25 +147,6 @@ test('the expanded list shows five rows at a time, newest first, and clears what
   await cleared.unmount()
 })
 
-test('a running task enters the list once it has outlasted a quick answer', async ($, on) => {
-  const clock = mock.clock(on)
-  const { files, toasts } = mockEngine(on, 'monitor')
-
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  files[TASKS_PATH] = JSON.stringify([{ ...RUNNING, listed_from_ms: 90_000 }])
-  await clock.advance(87_000)
-  const early = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await early.find({ type: 'Button' })).toBeUndefined()
-  await early.unmount()
-  expect(toasts).toEqual([])
-
-  await clock.advance(3000)
-  expect(toasts).toEqual(['开始处理：Alice · rc-dev：帮忙 review 一下 PR'])
-  const listed = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await listed.find({ type: 'Text', text: /已完成/ }))?.text).toBe('处理中 1 · 已完成 0')
-  await listed.unmount()
-})
-
 test('a task handed to another session stays open, says so, and can be removed by hand', async ($, on) => {
   mock.clock(on)
   const { files } = mockEngine(on, 'monitor')

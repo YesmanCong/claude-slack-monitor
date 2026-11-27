@@ -25,18 +25,11 @@ async function loadTasks($: EngineInterface): Promise<SlackTask[]> {
   }
 }
 
-// The hook lets a running task into the list only once it has outlasted a quick answer.
-async function loadListedTasks($: EngineInterface) {
-  const now = await $.clock.now()
-  return (await loadTasks($)).filter(task => task.ended !== undefined || now >= (task.listed_from_ms ?? 0))
-}
-
 async function dropTasks($: EngineInterface, isDropped: (task: SlackTask) => boolean) {
   // shortcut: read-modify-write on the file the monitor session's hook also writes, so a removal in the same instant as a task start or end can undo it; give removals a file of their own if that shows up.
   const kept = (await loadTasks($)).filter(task => !isDropped(task))
   await $.fs.write(await resolveTasksPath($), JSON.stringify(kept))
-  const listed = await loadListedTasks($)
-  await update($, tasks, () => listed)
+  await update($, tasks, () => kept)
 }
 
 function nameTask(task: SlackTask) {
@@ -64,7 +57,7 @@ export const register: Register = on => {
     const sessionId = await $.session.id()
     let seen: Map<string, string> | undefined
     const follow = async () => {
-      const current = await loadListedTasks($)
+      const current = await loadTasks($)
       const known = seen
       const phases = new Map(current.map(task => [task.id, task.ended ?? '']))
       seen = phases

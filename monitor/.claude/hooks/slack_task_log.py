@@ -15,8 +15,6 @@ REPORT = re.compile(r'<cross-session-message from="(?P<worker>local_[\w-]+)"[^>]
 TITLE_MAX = 80
 SUMMARY_MAX = 200
 KEPT_TASKS = 20
-# A turn shorter than this is a glance or a one-line reply and never enters the list. Two thirds of the monitor session's turns end sooner.
-QUICK_SECONDS = 20
 
 
 def name_sender(item):
@@ -66,11 +64,11 @@ def describe_task(prompt):
 
 
 def end_tasks(tasks, session_id, now, summary):
-    """Close what this session has running and kept to itself: a quiet or a quick task leaves the list, the others stay until the person removes them. A task handed to another session stays open until that session reports back."""
+    """Close what this session has running and kept to itself: a quiet task leaves the list, the others stay until the person removes them. A task handed to another session stays open until that session reports back."""
     ended = []
     for task in tasks:
         is_running = task.get("session_id") == session_id and "ended" not in task and "handed_to" not in task
-        if is_running and (task.get("quiet") or now.timestamp() * 1000 < task.get("listed_from_ms", 0)):
+        if is_running and task.get("quiet"):
             continue
         ended.append({**task, "ended": f"{now:%H:%M}", "summary": summary} if is_running else task)
     return ended
@@ -94,8 +92,7 @@ def report_back(tasks, worker, now, summary):
 
 def start_task(tasks, described, session_id, now):
     """A new prompt means this session's earlier turn is over, so what it left running is closed first."""
-    started = {"id": f"{session_id}:{now:%Y%m%d%H%M%S}", "session_id": session_id, **described, "started": f"{now:%H:%M}",
-               "listed_from_ms": int((now.timestamp() + QUICK_SECONDS) * 1000)}
+    started = {"id": f"{session_id}:{now:%Y%m%d%H%M%S}", "session_id": session_id, **described, "started": f"{now:%H:%M}"}
     return [*end_tasks(tasks, session_id, now, ""), started][-KEPT_TASKS:]
 
 
