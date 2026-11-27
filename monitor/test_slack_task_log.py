@@ -19,10 +19,10 @@ def push(*items):
 class DescribeTask(unittest.TestCase):
     def test_one_pushed_message_is_named_after_its_sender_and_text(self):
         prompt = push({"user_name": "Alice Wang (ENG - BE)", "channel_name": "rc-dev",
-                       "text": "帮忙 review\n一下 <https://github.com/acme/app/pull/12> 和 <https://example.com/doc|设计文档>",
+                       "text": "<@U012ABCDEF> 帮忙 review\n一下 <https://github.com/acme/app/pull/12> 和 <https://example.com/doc|设计文档>，<@U034|Bob> 也看看 <!here>",
                        "permalink": "https://example.slack.com/archives/C1/p1"})
         self.assertEqual(task_log.describe_task(prompt), {
-            "sender": "Alice Wang · rc-dev", "title": "帮忙 review 一下 github.com/acme/app/pull/12 和 设计文档", "quiet": False,
+            "sender": "Alice Wang · rc-dev", "title": "帮忙 review 一下 github.com/acme/app/pull/12 和 设计文档，Bob 也看看 @here", "quiet": False,
             "permalink": "https://example.slack.com/archives/C1/p1"})
 
     def test_several_messages_list_their_senders_once(self):
@@ -46,8 +46,7 @@ class TaskList(unittest.TestCase):
     def test_a_task_runs_until_its_session_stops(self):
         tasks = task_log.start_task([], {"title": "Alice：hi", "quiet": False}, "monitor", NOW)
         self.assertEqual(tasks, [{"id": "monitor:20261127105307", "session_id": "monitor", "title": "Alice：hi",
-                                  "quiet": False, "started": "10:53",
-                                  "listed_from_ms": int((NOW.timestamp() + task_log.QUICK_SECONDS) * 1000)}])
+                                  "quiet": False, "started": "10:53"}])
         self.assertEqual(task_log.end_tasks(tasks, "other", NOW, "别的事"), tasks)
         ended = task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(minutes=4), "已回复 Alice。")
         self.assertEqual(ended, [{**tasks[0], "ended": "10:57", "summary": "已回复 Alice。"}])
@@ -57,15 +56,21 @@ class TaskList(unittest.TestCase):
         tasks = task_log.start_task([], {"title": "跟进检查", "quiet": True}, "monitor", NOW)
         self.assertEqual(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(minutes=4), ""), [])
 
-    def test_a_quickly_answered_task_never_enters_the_list(self):
-        tasks = task_log.start_task([], {"title": "Alice：在吗", "quiet": False}, "monitor", NOW)
-        self.assertEqual(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(seconds=task_log.QUICK_SECONDS - 1), "在的。"), [])
-        self.assertEqual(len(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(seconds=task_log.QUICK_SECONDS), "查完了。")), 1)
-
     def test_a_new_task_closes_what_the_session_left_running(self):
         tasks = task_log.start_task([], {"title": "第一件", "quiet": False}, "monitor", NOW)
         tasks = task_log.start_task(tasks, {"title": "第二件", "quiet": False}, "monitor", NOW + dt.timedelta(minutes=2))
         self.assertEqual([(task["title"], task.get("ended")) for task in tasks], [("第一件", "10:55"), ("第二件", None)])
+
+    def test_a_task_handed_to_another_session_ends_when_that_session_reports_back(self):
+        tasks = task_log.start_task([], {"title": "PM 定了默认勾选", "quiet": False}, "monitor", NOW)
+        handed = task_log.hand_off(tasks, "monitor", "local_worker", NOW + dt.timedelta(seconds=5))
+        self.assertEqual(handed, [{**tasks[0], "handed_to": ["local_worker"], "handed_at": "10:53"}])
+        self.assertEqual(task_log.end_tasks(handed, "monitor", NOW + dt.timedelta(seconds=8), "已转给那个会话。"), handed)
+        later = task_log.start_task(handed, {"title": "下一件", "quiet": False}, "monitor", NOW + dt.timedelta(minutes=3))
+        self.assertNotIn("ended", later[0])
+        self.assertEqual(task_log.report_back(later, "local_other", NOW, "别的事"), later)
+        done = task_log.report_back(later, "local_worker", NOW + dt.timedelta(minutes=20), "已部署，自测通过。")
+        self.assertEqual((done[0]["ended"], done[0]["summary"], "ended" in done[1]), ("11:13", "已部署，自测通过。", False))
 
 
 if __name__ == "__main__":

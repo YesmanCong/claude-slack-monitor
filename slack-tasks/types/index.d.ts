@@ -7,7 +7,7 @@ export type SlackTask = {
   permalink?: string
   quiet: boolean
   started: string
-  listed_from_ms?: number
+  handed_at?: string
   ended?: string
   summary?: string
 }

@@ -27,6 +27,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "SendMessage|mcp__ccd_session_mgmt__send_message",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/.claude/hooks/slack_task_log.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

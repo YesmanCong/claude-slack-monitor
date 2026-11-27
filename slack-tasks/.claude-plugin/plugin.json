@@ -1,6 +1,6 @@
 {
   "name": "slack-tasks",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "输入框上方列出 Slack 监控会话正在处理和处理完的任务，可以折叠，展开后最多显示 5 行、可翻动，处理完的可以单条移除或一键清空；任务开始和结束时弹 toast 和系统通知",
   "types": "./types/index.d.ts"
 }
