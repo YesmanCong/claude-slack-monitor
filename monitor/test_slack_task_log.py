@@ -47,7 +47,7 @@ class TaskList(unittest.TestCase):
         tasks = task_log.start_task([], {"title": "Alice：hi", "quiet": False}, "monitor", NOW)
         self.assertEqual(tasks, [{"id": "monitor:20261127105307", "session_id": "monitor", "title": "Alice：hi",
                                   "quiet": False, "started": "10:53",
-                                  "listed_from_ms": int((NOW.timestamp() + 90) * 1000)}])
+                                  "listed_from_ms": int((NOW.timestamp() + task_log.QUICK_SECONDS) * 1000)}])
         self.assertEqual(task_log.end_tasks(tasks, "other", NOW, "别的事"), tasks)
         ended = task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(minutes=4), "已回复 Alice。")
         self.assertEqual(ended, [{**tasks[0], "ended": "10:57", "summary": "已回复 Alice。"}])
@@ -57,10 +57,10 @@ class TaskList(unittest.TestCase):
         tasks = task_log.start_task([], {"title": "跟进检查", "quiet": True}, "monitor", NOW)
         self.assertEqual(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(minutes=4), ""), [])
 
-    def test_a_task_answered_within_ninety_seconds_never_enters_the_list(self):
+    def test_a_quickly_answered_task_never_enters_the_list(self):
         tasks = task_log.start_task([], {"title": "Alice：在吗", "quiet": False}, "monitor", NOW)
-        self.assertEqual(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(seconds=89), "在的。"), [])
-        self.assertEqual(len(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(seconds=90), "查完了。")), 1)
+        self.assertEqual(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(seconds=task_log.QUICK_SECONDS - 1), "在的。"), [])
+        self.assertEqual(len(task_log.end_tasks(tasks, "monitor", NOW + dt.timedelta(seconds=task_log.QUICK_SECONDS), "查完了。")), 1)
 
     def test_a_new_task_closes_what_the_session_left_running(self):
         tasks = task_log.start_task([], {"title": "第一件", "quiet": False}, "monitor", NOW)
