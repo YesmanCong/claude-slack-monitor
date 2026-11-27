@@ -12,8 +12,8 @@ BOARD_PREFIX = "[待办看板]"
 TITLE_MAX = 80
 SUMMARY_MAX = 200
 KEPT_TASKS = 20
-# A turn shorter than this is a quick answer (small talk, a one-line reply): it never enters the list.
-QUICK_SECONDS = 90
+# A turn shorter than this is a glance or a one-line reply and never enters the list. Two thirds of the monitor session's turns end sooner.
+QUICK_SECONDS = 20
 
 
 def name_sender(item):
