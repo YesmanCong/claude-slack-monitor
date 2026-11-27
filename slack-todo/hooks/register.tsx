@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Todo, TodoStatus } from '../types'
+import { drawPollerStatus, drawToday, followPoller } from './poller'
+import { drawTasks, followTasks } from './tasks'
 
 const PANE = 'slack-todo'
 const TOOL = 'mcp__slack-todo__add_todo'
@@ -185,6 +187,7 @@ export const register: Register = on => {
     // /reload-plugins does not redraw the footer, so ask for it once the module is in.
     $.ui.invalidate('ui.render')
     void $.ui.open({ id: PANE, title: '待办' })
+    await Promise.all([followTasks($), followPoller($)])
 
     return started
   })
@@ -290,127 +293,131 @@ export const register: Register = on => {
     const expanded = await read($, expandedIds)
     const now = await $.clock.now()
 
-    if (pending.length === 0) {
-      return (
-        <Box padding="lg" borderStyle="round" borderColor="subtle" justifyContent="center">
-          <Text dimColor>没有待处理的事项</Text>
+    const board =
+      pending.length === 0 ? (
+        <Text dimColor>没有待处理的事项</Text>
+      ) : (
+        <Box flexDirection="column" gap="md">
+          <Text dimColor size="footnote">
+            {pending.length} 条待处理
+          </Text>
+          {pending.map(todo => {
+            const source = labelSource(todo.source)
+            const sessionId = sessionIdOf(todo.source)
+            const isExpanded = expanded.includes(todo.id)
+            const isRevising = Input !== undefined && revising === todo.id
+            const isClamped =
+              todo.title.length > TITLE_MAX || todo.suggestion.length > SUGGESTION_MAX
+            const hasMore = todo.detail !== undefined || isClamped
+
+            return (
+              <Box
+                key={`todo-${todo.id}`}
+                flexDirection="column"
+                gap="sm"
+                padding="md"
+                borderStyle="round"
+                borderColor={isRevising ? 'claude' : 'subtle'}
+              >
+                <Text weight="semibold">
+                  {isExpanded ? todo.title : clamp(todo.title, TITLE_MAX)}
+                </Text>
+                <Box gap="sm" flexWrap="wrap">
+                  {source.href === undefined ? (
+                    <Text dimColor size="footnote" wrap="truncate-end">
+                      {source.label}
+                    </Text>
+                  ) : (
+                    <Link href={source.href} label={`${source.label} ↗`} />
+                  )}
+                  <Text dimColor size="footnote">
+                    · {formatAge(todo.createdAt, now)}
+                  </Text>
+                </Box>
+                <Box flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="quote" borderColor="claude">
+                  <Text color="claude" size="caption" weight="semibold">
+                    建议
+                  </Text>
+                  <Text>
+                    {isExpanded ? todo.suggestion : clamp(todo.suggestion, SUGGESTION_MAX)}
+                  </Text>
+                </Box>
+                {hasMore && (
+                  <Button
+                    key={`more-${todo.id}`}
+                    plain
+                    onPress={() =>
+                      update($, expandedIds, ids =>
+                        ids.includes(todo.id)
+                          ? ids.filter(id => id !== todo.id)
+                          : [...ids, todo.id],
+                      )
+                    }
+                  >
+                    <Text color="suggestion" size="footnote">
+                      {isExpanded ? '收起详情 ▴' : '展开详情 ▾'}
+                    </Text>
+                  </Button>
+                )}
+                {isExpanded && todo.detail !== undefined && (
+                  <Box paddingLeft="sm">
+                    <Markdown key={`detail-${todo.id}`} text={todo.detail} dimColor />
+                  </Box>
+                )}
+                <Box gap="sm" flexWrap="wrap">
+                  <Button
+                    key={`accept-${todo.id}`}
+                    label="按建议执行"
+                    variant="primary"
+                    onPress={() => decide($, todo, 'accepted', acceptPrompt(todo))}
+                  />
+                  {Input !== undefined && (
+                    <Button
+                      key={`revise-${todo.id}`}
+                      label={isRevising ? '取消修改' : '修改执行方式'}
+                      onPress={() =>
+                        update($, revisingId, id => (id === todo.id ? null : todo.id))
+                      }
+                    />
+                  )}
+                  <Button
+                    key={`ignore-${todo.id}`}
+                    label="忽略"
+                    onPress={() => decide($, todo, 'ignored')}
+                  />
+                  {sessionId !== undefined && (
+                    <Button
+                      key={`archive-${todo.id}`}
+                      label="归档 session"
+                      onPress={() => decide($, todo, 'archived', archivePrompt(todo, sessionId))}
+                    />
+                  )}
+                </Box>
+                {Input !== undefined && isRevising && (
+                  <Input
+                    key={`how-${todo.id}`}
+                    placeholder="写下你要的执行方式，回车提交"
+                    submitLabel="提交"
+                    rows={3}
+                    autoFocus
+                    onSubmit={(value: string) => {
+                      if (value.trim() === '') return
+                      void decide($, todo, 'revised', revisePrompt(todo, value.trim()))
+                    }}
+                  />
+                )}
+              </Box>
+            )
+          })}
         </Box>
       )
-    }
 
     return (
-      <Box flexDirection="column" gap="md">
-        <Text dimColor size="footnote">
-          {pending.length} 条待处理
-        </Text>
-        {pending.map(todo => {
-          const source = labelSource(todo.source)
-          const sessionId = sessionIdOf(todo.source)
-          const isExpanded = expanded.includes(todo.id)
-          const isRevising = Input !== undefined && revising === todo.id
-          const isClamped =
-            todo.title.length > TITLE_MAX || todo.suggestion.length > SUGGESTION_MAX
-          const hasMore = todo.detail !== undefined || isClamped
-
-          return (
-            <Box
-              key={`todo-${todo.id}`}
-              flexDirection="column"
-              gap="sm"
-              padding="md"
-              borderStyle="round"
-              borderColor={isRevising ? 'claude' : 'subtle'}
-            >
-              <Text weight="semibold">
-                {isExpanded ? todo.title : clamp(todo.title, TITLE_MAX)}
-              </Text>
-              <Box gap="sm" flexWrap="wrap">
-                {source.href === undefined ? (
-                  <Text dimColor size="footnote" wrap="truncate-end">
-                    {source.label}
-                  </Text>
-                ) : (
-                  <Link href={source.href} label={`${source.label} ↗`} />
-                )}
-                <Text dimColor size="footnote">
-                  · {formatAge(todo.createdAt, now)}
-                </Text>
-              </Box>
-              <Box flexDirection="column" gap="xs" paddingLeft="sm" borderStyle="quote" borderColor="claude">
-                <Text color="claude" size="caption" weight="semibold">
-                  建议
-                </Text>
-                <Text>
-                  {isExpanded ? todo.suggestion : clamp(todo.suggestion, SUGGESTION_MAX)}
-                </Text>
-              </Box>
-              {hasMore && (
-                <Button
-                  key={`more-${todo.id}`}
-                  plain
-                  onPress={() =>
-                    update($, expandedIds, ids =>
-                      ids.includes(todo.id)
-                        ? ids.filter(id => id !== todo.id)
-                        : [...ids, todo.id],
-                    )
-                  }
-                >
-                  <Text color="suggestion" size="footnote">
-                    {isExpanded ? '收起详情 ▴' : '展开详情 ▾'}
-                  </Text>
-                </Button>
-              )}
-              {isExpanded && todo.detail !== undefined && (
-                <Box paddingLeft="sm">
-                  <Markdown key={`detail-${todo.id}`} text={todo.detail} dimColor />
-                </Box>
-              )}
-              <Box gap="sm" flexWrap="wrap">
-                <Button
-                  key={`accept-${todo.id}`}
-                  label="按建议执行"
-                  variant="primary"
-                  onPress={() => decide($, todo, 'accepted', acceptPrompt(todo))}
-                />
-                {Input !== undefined && (
-                  <Button
-                    key={`revise-${todo.id}`}
-                    label={isRevising ? '取消修改' : '修改执行方式'}
-                    onPress={() =>
-                      update($, revisingId, id => (id === todo.id ? null : todo.id))
-                    }
-                  />
-                )}
-                <Button
-                  key={`ignore-${todo.id}`}
-                  label="忽略"
-                  onPress={() => decide($, todo, 'ignored')}
-                />
-                {sessionId !== undefined && (
-                  <Button
-                    key={`archive-${todo.id}`}
-                    label="归档 session"
-                    onPress={() => decide($, todo, 'archived', archivePrompt(todo, sessionId))}
-                  />
-                )}
-              </Box>
-              {Input !== undefined && isRevising && (
-                <Input
-                  key={`how-${todo.id}`}
-                  placeholder="写下你要的执行方式，回车提交"
-                  submitLabel="提交"
-                  rows={3}
-                  autoFocus
-                  onSubmit={(value: string) => {
-                    if (value.trim() === '') return
-                    void decide($, todo, 'revised', revisePrompt(todo, value.trim()))
-                  }}
-                />
-              )}
-            </Box>
-          )
-        })}
+      <Box flexDirection="column" gap="lg">
+        {await drawPollerStatus($, elements)}
+        {board}
+        {await drawTasks($, elements)}
+        {await drawToday($, elements)}
       </Box>
     )
   })

@@ -31,6 +31,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('ui.open', () => ({ value: { isPlaced: true } }))
     on('ui.status', () => ({ value: undefined }))
     on('ui.toast', () => ({ value: undefined }))
+    on('session.id', () => ({ value: 'session-1' }))
     on('session.start', (_, e) => ({ cwd: e.cwd }))
     on('prompt.submit', (_, e) => {
       submitted.push(e.text)
@@ -84,6 +85,7 @@ test('archive button only on session cards, submits an archive prompt', async ($
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'session-1' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => {
     submitted.push(e.text)
@@ -119,6 +121,7 @@ test('resolve takes a pending card off the board without a prompt', async ($, on
     toasts.push(e.text)
     return { value: undefined }
   })
+  on('session.id', () => ({ value: 'session-1' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => {
     submitted.push(e.text)

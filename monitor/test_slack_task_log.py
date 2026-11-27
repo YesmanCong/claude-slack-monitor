@@ -21,14 +21,19 @@ class DescribeTask(unittest.TestCase):
         prompt = push({"user_name": "Alice Wang (ENG - BE)", "channel_name": "rc-dev",
                        "text": "<@U012ABCDEF> 帮忙 review\n一下 <https://github.com/acme/app/pull/12> 和 <https://example.com/doc|设计文档>，<@U034|Bob> 也看看 <!here>",
                        "permalink": "https://example.slack.com/archives/C1/p1"})
+        text = "帮忙 review 一下 github.com/acme/app/pull/12 和 设计文档，Bob 也看看 @here"
         self.assertEqual(task_log.describe_task(prompt), {
-            "sender": "Alice Wang · rc-dev", "title": "帮忙 review 一下 github.com/acme/app/pull/12 和 设计文档，Bob 也看看 @here", "quiet": False,
-            "permalink": "https://example.slack.com/archives/C1/p1"})
+            "sender": "Alice Wang · rc-dev", "title": text, "quiet": False, "permalink": "https://example.slack.com/archives/C1/p1",
+            "messages": [{"sender": "Alice Wang · rc-dev", "text": text, "permalink": "https://example.slack.com/archives/C1/p1"}]})
 
-    def test_several_messages_list_their_senders_once(self):
-        prompt = push({"user_name": "GitHub", "channel_name": "DM: GitHub"}, {"user_name": "GitHub", "channel_name": "DM: GitHub"},
-                      {"user_name": "Bob", "channel_name": "rc-dev"})
-        self.assertEqual(task_log.describe_task(prompt), {"sender": "3 条消息", "title": "GitHub、Bob · rc-dev", "quiet": False})
+    def test_several_messages_keep_each_message_and_name_their_senders_once(self):
+        prompt = push({"user_name": "GitHub", "channel_name": "DM: GitHub", "text": "PR #12 等你 review"},
+                      {"user_name": "GitHub", "channel_name": "DM: GitHub", "text": "PR #13 合并了"},
+                      {"user_name": "U0123ABCDE", "channel_name": "rc-dev", "text": "这个能上线吗"})
+        self.assertEqual(task_log.describe_task(prompt), {
+            "sender": "3 条消息 · GitHub、rc-dev", "title": "PR #12 等你 review", "quiet": False,
+            "messages": [{"sender": "GitHub", "text": "PR #12 等你 review"}, {"sender": "GitHub", "text": "PR #13 合并了"},
+                         {"sender": "rc-dev", "text": "这个能上线吗"}]})
 
     def test_a_timed_check_is_quiet(self):
         prompt = "[slack-poller] 10:30 跟进检查：2 件在等别人回复，按 slack-monitor.md「跟进检查」处理。"

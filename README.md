@@ -20,10 +20,9 @@ A long-running Claude Code session that receives your Slack DMs, mentions and Gi
 | `monitor/slack_whoami.mjs` | 用登录态只读地查出 user id、工作区子域名和通知 DM 的 channel id；监控第一次启动时会自动调用它填好配置 |
 | `monitor/slack_backfill.mjs` | 把某一天 Claude 替你发出的消息从 Slack 搜回来，补进设置页「记录」读的 `slack-activity-log.jsonl`（只读 Slack） |
 | `monitor/.claude/hooks/slack_todo_reminder.py` | UserPromptSubmit hook：每条推送进来时把设置页当前的处理方式表和 Claude 自己维护的动态规则（`slack-monitor-rules.md`）注入给 Claude |
-| `monitor/.claude/hooks/slack_task_log.py` | UserPromptSubmit、PostToolUse 和 Stop hook：监控会话开始处理一批推送、一次定时检查或一张待办卡时记一个任务，这一轮结束时记完成；这一轮里用 `SendMessage` 把事情转给了别的会话的，等那个会话发回执回来才记完成。写进 `~/.claude/slack-tasks.json`，标题里的 Slack 链接标记和 `<@U…>` 这类 id 会去掉 |
+| `monitor/.claude/hooks/slack_task_log.py` | UserPromptSubmit、PostToolUse 和 Stop hook：监控会话开始处理一批推送、一次定时检查或一张待办卡时记一个任务，这一轮结束时记完成；这一轮里用 `SendMessage` 把事情转给了别的会话的，等那个会话发回执回来才记完成。写进 `~/.claude/slack-tasks.json`，每条消息的发送人和内容都记下来，Slack 链接标记、`<@U…>` 这类 id 和只有 id 的发送人名字会去掉 |
 | `monitor/slack-monitor.md`、`monitor/CLAUDE.md` | 给 Claude 的分诊规则模板，按自己的习惯改 |
-| `slack-todo/` | Claude Code mod：侧边的待办看板，提供 `add_todo`、`resolve_todo` 工具和 `/todo` 命令，每张卡可以「按建议执行」「修改执行方式」或「忽略」；用户在别处处理完的卡由 Claude 用 `resolve_todo` 关掉 |
-| `slack-tasks/` | Claude Code mod：在每个会话的输入框上方列出监控会话正在处理和处理完的任务：可以折叠，展开后最多显示 5 行、用箭头翻动，左边发送人和内容、右边状态（处理中、已转给别的会话、已完成），处理完和已转出去的可以单条「移除」，处理完的可以「清空已完成」；消息和待办的任务在开始和结束时各弹一次 toast 和系统通知，定时检查只在进行时显示 |
+| `slack-todo/` | Claude Code mod：侧边的 Slack 监控面板。上面一行是 poller 是否在跑、有没有连上 Slack，旁边的「设置页」按钮用系统浏览器打开设置页；中间是待办看板（`add_todo`、`resolve_todo` 工具和 `/todo` 命令，每张卡可以「按建议执行」「修改执行方式」或「忽略」，用户在别处处理完的卡由 Claude 用 `resolve_todo` 关掉）；下面是监控会话正在处理、已转给别的会话和处理完的任务，点任务名展开能看到每条消息的发送人和内容、完整的处理结果，处理完的可以单条「移除」或「清空已完成」；最下面是今天收到、推给 Claude、代发的条数和每小时柱状图。消息和待办的任务在开始和结束时各弹一次 toast 和系统通知 |
 
 ## 环境要求
 
@@ -55,12 +54,11 @@ A long-running Claude Code session that receives your Slack DMs, mentions and Gi
    - `identity.claude_app_user_id`（可选，工作区里 Claude app 的 user id）只能在配置文件里填
    - 没查到通知 DM 的 app，那一类通知就不收
 
-4. 安装待办看板和任务列表：在 Claude Code 里把本仓库加成 plugin marketplace，再装 `slack-todo` 和 `slack-tasks`。
+4. 安装监控面板：在 Claude Code 里把本仓库加成 plugin marketplace，再装 `slack-todo`。
 
    ```text
    /plugin marketplace add <本仓库的路径或 GitHub 地址>
    /plugin install slack-todo@claude-slack-monitor
-   /plugin install slack-tasks@claude-slack-monitor
    ```
 
 5. 在 `monitor/` 目录开一个 Claude Code 会话（`.claude/settings.json` 里的 hook 会自动生效），让它在后台跑：
@@ -174,7 +172,7 @@ slk 用上游的 `ConnectionManager` 保持 WebSocket 连接，通过 `OnMessage
 | 2. 装依赖 | agent | 在 `monitor/` 里跑 `npm ci` | `node slack_source.test.mjs` 输出 `ok` |
 | 3. 登录 Slack | 用户 | agent 后台跑 `node slack_login.mjs`，请用户在弹出的 Chrome 窗口里自己登录 | 脚本打印「登录成功」并退出码 0。agent 不碰 cookie、不读 Keychain、不替用户输入密码 |
 | 4. 配置 | agent | `cp slack-poller-config.example.json slack-poller-config.json`。`identity.my_user_id`、`identity.team_domain`、`notification_dms` 留空，第 6 步启动时脚本会从登录态查出来填进去；`agent_reply_prefixes` 问用户想用什么前缀，没意见就用示例里的 | 第 6 步启动后，配置是合法 JSON，`my_user_id` 以 `U` 开头，`team_domain` 非空 |
-| 5. 装待办看板和任务列表 | 用户 | 请用户在 Claude Code 里依次执行 `/plugin marketplace add <仓库路径>`、`/plugin install slack-todo@claude-slack-monitor` 和 `/plugin install slack-tasks@claude-slack-monitor`，装完 `/reload-plugins` | agent 能看到 `mcp__slack-todo__add_todo` 工具（找不到就用工具搜索 `slack-todo`）；用户执行 `/todo` 能打开看板 |
+| 5. 装监控面板 | 用户 | 请用户在 Claude Code 里依次执行 `/plugin marketplace add <仓库路径>` 和 `/plugin install slack-todo@claude-slack-monitor`，装完 `/reload-plugins` | agent 能看到 `mcp__slack-todo__add_todo` 工具（找不到就用工具搜索 `slack-todo`）；用户执行 `/todo` 能打开看板 |
 | 6. 启动监控 | agent | 在**当前会话**的后台 Bash 里跑 `python3 -I slack_poller.py`（不要另开终端，否则推不进这个会话） | `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8765` 返回 200；后台输出里出现「已连上 Slack」 |
 | 7. 端到端试一条 | 用户 + agent | 请用户在 Slack 任意频道发一条 @ 自己的消息 | 几秒内本会话收到以 `[slack-poller]` 开头的推送，里面那条的 `to_claude` 为 true。不在配置的推送时段内时消息会先攒着，到点才推，可以先在设置页临时放宽时段 |
 | 8. 交接 | agent | 告诉用户设置页地址，提醒用户按习惯改 `slack-monitor.md` 的分诊规则；以后会话重启要重新跑第 6 步，会话失效（收到「需要重新登录」）要重跑第 3 步再在设置页点「重连」 | — |

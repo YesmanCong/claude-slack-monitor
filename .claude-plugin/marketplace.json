@@ -2,7 +2,6 @@
   "name": "claude-slack-monitor",
   "owner": { "name": "claude-slack-monitor contributors" },
   "plugins": [
-    { "name": "slack-todo", "source": "./slack-todo" },
-    { "name": "slack-tasks", "source": "./slack-tasks" }
+    { "name": "slack-todo", "source": "./slack-todo" }
   ]
 }

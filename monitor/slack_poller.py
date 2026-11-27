@@ -1760,6 +1760,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/recent.json":
             with buffer_lock:
                 return self.send_json(list(reversed(recent)))
+        if url.path == "/status.json":
+            return self.send_json(status)
         if url.path == "/activity.json":
             query = parse_qs(url.query)
             days = query.get("days", ["1"])[0]
