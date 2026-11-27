@@ -52,12 +52,18 @@ export async function followPoller($: EngineInterface) {
   $.clock.every(POLL_MS, () => void follow())
 }
 
+// A Link to an http: address is drawn as plain text outside the terminal, so the page is opened through the system.
+async function openSettingsPage($: EngineInterface) {
+  const opened = await $.process.run(['open', POLLER_URL]).catch(() => undefined)
+  if (opened?.exitCode !== 0) $.ui.toast(`设置页没打开，地址是 ${POLLER_URL}`)
+}
+
 // "2026-11-27 17:01:05" as the poller writes it.
 function readClock(stamp: string | null) {
   return stamp === null ? '还没有' : stamp.slice(11, 16)
 }
 
-export async function drawPollerStatus($: EngineInterface, { Box, Text }: Elements) {
+export async function drawPollerStatus($: EngineInterface, { Box, Text, Button }: Elements) {
   const status = await read($, poller)
   if (status === null) {
     return (
@@ -81,6 +87,12 @@ export async function drawPollerStatus($: EngineInterface, { Box, Text }: Elemen
         ) : (
           <Text color="warning">{status.needs_login ? '要重新登录 Slack' : '正在连 Slack'}</Text>
         )}
+        <Box flexGrow={1} />
+        <Button key="open-settings" plain onPress={() => openSettingsPage($)}>
+          <Text dimColor size="footnote">
+            设置页
+          </Text>
+        </Button>
       </Box>
       <Text dimColor size="footnote">
         最后收到 {readClock(status.last_item)} · 最后推给 Claude {readClock(status.last_push)}

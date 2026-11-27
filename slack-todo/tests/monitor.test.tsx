@@ -42,6 +42,7 @@ function mockEngine(on: On, sessionId: string, pollerAnswers?: Record<string, un
   const files: Record<string, string> = {}
   const toasts: string[] = []
   const notices: string[] = []
+  const commands: (readonly string[])[] = []
   mock.store(on)
   mock.env(on, { HOME: '/home/me' })
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -67,13 +68,17 @@ function mockEngine(on: On, sessionId: string, pollerAnswers?: Record<string, un
     files[e.path] = e.text
     return { value: undefined }
   })
+  on('process.run', (_, e) => {
+    commands.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
   on('http.fetch', (_, e) => {
     const answer = pollerAnswers?.[e.url]
     if (answer === undefined) throw new Error('connection refused')
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } }
   })
 
-  return { files, toasts, notices }
+  return { files, toasts, notices, commands }
 }
 
 const POLLER_UP = {
@@ -84,10 +89,12 @@ const POLLER_UP = {
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`the pane shows the poller, the todo board, the tasks and today on ${surface}`, async ($, on) => {
     const clock = mock.clock(on)
-    const { files, toasts, notices } = mockEngine(on, 'monitor', POLLER_UP)
+    const { files, toasts, notices, commands } = mockEngine(on, 'monitor', POLLER_UP)
 
     await $.session.start({ cwd: '/', surface, isInteractive: true })
     const idle = await $.ui.mount({ ...PANE, surface })
+    await idle.press({ key: 'open-settings' })
+    expect(commands).toEqual([['open', 'http://127.0.0.1:8765']])
     expect((await idle.find({ type: 'Text', text: /poller/ }))?.text).toBe('● poller 在跑')
     expect((await idle.find({ type: 'Text', text: /最后收到/ }))?.text).toBe('最后收到 17:01 · 最后推给 Claude 17:01')
     expect((await idle.find({ type: 'Text', text: /没有待处理/ }))?.text).toBe('没有待处理的事项')
