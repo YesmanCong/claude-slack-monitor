@@ -18,6 +18,7 @@ export type SlackTask = {
   sender?: string
   title: string
   permalink?: string
+  messages?: { sender: string; text: string; permalink?: string }[]
   quiet: boolean
   started: string
   handed_at?: string
@@ -49,6 +50,7 @@ declare module 'claude-code' {
       revisingId: string | null
       expandedIds: string[]
       tasks: SlackTask[]
+      expandedTaskIds: string[]
       poller: PollerStatus | null
       today: TodayActivity | null
     }

@@ -7,8 +7,10 @@ type Elements = ReturnType<EngineInterface['ui']['resolve']>
 
 const POLL_MS = 3000
 const NOTIFY_TITLE = 'Slack 监控'
+const NOTIFY_SUMMARY_MAX = 200
 
 const tasks = atom({ plugin: 'slack-todo', key: 'tasks' } as const, [])
+const expandedTaskIds = atom({ plugin: 'slack-todo', key: 'expandedTaskIds' } as const, [])
 
 async function resolveTasksPath($: EngineInterface) {
   const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('HOME')}/.claude`
@@ -40,7 +42,8 @@ function announce(task: SlackTask) {
 }
 
 async function notify($: EngineInterface, task: SlackTask) {
-  const text = [announce(task), task.ended === undefined ? undefined : task.summary].filter(Boolean).join('\n')
+  const summary = task.ended === undefined ? undefined : task.summary?.slice(0, NOTIFY_SUMMARY_MAX)
+  const text = [announce(task), summary].filter(Boolean).join('\n')
   try {
     const sent = await $.ui.notify(text, { title: NOTIFY_TITLE })
     if (!sent.isSent) $.ui.toast(`系统通知没发出去：${sent.reason}`)
@@ -77,6 +80,9 @@ export async function drawTasks($: EngineInterface, { Box, Text, Button, Link }:
   const newestFirst = [...(await read($, tasks))].reverse()
   if (newestFirst.length === 0) return undefined
   const endedCount = newestFirst.filter(task => task.ended !== undefined).length
+  const expanded = await read($, expandedTaskIds)
+  const toggle = (id: string) =>
+    update($, expandedTaskIds, ids => (ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id]))
 
   return (
     <Box flexDirection="column" gap="sm">
@@ -93,40 +99,77 @@ export async function drawTasks($: EngineInterface, { Box, Text, Button, Link }:
           </Button>
         )}
       </Box>
-      {newestFirst.map(task => (
-        <Box flexDirection="column" gap="xs" padding="md" borderStyle="round" borderColor="subtle">
-          <Box gap="sm" alignItems="center">
-            <Text weight="semibold" wrap="truncate-end">
-              {task.sender ?? task.title}
-            </Text>
-            <Box flexGrow={1} />
-            {task.ended !== undefined ? (
-              <Text dimColor size="footnote">
-                已完成 · {task.ended}
-              </Text>
-            ) : (
-              <Text color="claude" size="footnote">
-                {task.handed_at === undefined ? `处理中 · ${task.started}` : `已转给别的会话 · ${task.handed_at}`}
-              </Text>
-            )}
-          </Box>
-          {task.sender !== undefined && <Text dimColor>{task.title}</Text>}
-          {task.ended !== undefined && task.summary !== undefined && task.summary !== '' && (
-            <Text size="footnote">{task.summary}</Text>
-          )}
-          <Box gap="md" alignItems="center">
-            {task.permalink !== undefined && <Link href={task.permalink} label="原文" />}
-            {/* A task handed to a session that never reports back would stay open for good, so it can be removed by hand. */}
-            {(task.ended !== undefined || task.handed_at !== undefined) && (
-              <Button key={`remove-task-${task.id}`} plain onPress={() => dropTasks($, one => one.id === task.id)}>
-                <Text dimColor size="footnote">
-                  移除
+      {newestFirst.map(task => {
+        const isExpanded = expanded.includes(task.id)
+        const messages = task.messages ?? []
+        const hasSummary = task.ended !== undefined && task.summary !== undefined && task.summary !== ''
+
+        return (
+          <Box flexDirection="column" gap="xs" padding="md" borderStyle="round" borderColor="subtle">
+            <Box gap="sm" alignItems="center">
+              <Button key={`toggle-task-${task.id}`} plain onPress={() => toggle(task.id)}>
+                <Text weight="semibold">
+                  {isExpanded ? '▾' : '▸'} {task.sender ?? task.title}
                 </Text>
               </Button>
+              <Box flexGrow={1} />
+              {task.ended !== undefined ? (
+                <Text dimColor size="footnote">
+                  已完成 · {task.ended}
+                </Text>
+              ) : (
+                <Text color="claude" size="footnote">
+                  {task.handed_at === undefined ? `处理中 · ${task.started}` : `已转给别的会话 · ${task.handed_at}`}
+                </Text>
+              )}
+            </Box>
+            {!isExpanded && task.sender !== undefined && (
+              <Text dimColor wrap="truncate-end">
+                {task.title}
+              </Text>
             )}
+            {!isExpanded && hasSummary && (
+              <Text size="footnote" wrap="truncate-end">
+                {task.summary}
+              </Text>
+            )}
+            {isExpanded && messages.length === 0 && task.sender !== undefined && <Text dimColor>{task.title}</Text>}
+            {isExpanded &&
+              messages.map(message => (
+                <Box flexDirection="column">
+                  <Box gap="sm" alignItems="center">
+                    <Text dimColor size="footnote">
+                      {message.sender}
+                    </Text>
+                    {message.permalink !== undefined && <Link href={message.permalink} label="原文" />}
+                  </Box>
+                  <Text>{message.text}</Text>
+                </Box>
+              ))}
+            {isExpanded && hasSummary && (
+              <Box flexDirection="column">
+                <Text dimColor size="footnote">
+                  处理结果
+                </Text>
+                <Text>{task.summary}</Text>
+              </Box>
+            )}
+            <Box gap="md" alignItems="center">
+              {!(isExpanded && messages.length > 0) && task.permalink !== undefined && (
+                <Link href={task.permalink} label="原文" />
+              )}
+              {/* A task handed to a session that never reports back would stay open for good, so it can be removed by hand. */}
+              {(task.ended !== undefined || task.handed_at !== undefined) && (
+                <Button key={`remove-task-${task.id}`} plain onPress={() => dropTasks($, one => one.id === task.id)}>
+                  <Text dimColor size="footnote">
+                    移除
+                  </Text>
+                </Button>
+              )}
+            </Box>
           </Box>
-        </Box>
-      ))}
+        )
+      })}
     </Box>
   )
 }

@@ -175,3 +175,29 @@ test('tasks are listed newest first without an announcement at start, and the fi
 
   expect(JSON.parse(files[TASKS_PATH] ?? '[]').map((task: { id: string }) => task.id)).toEqual(['monitor:3'])
 })
+
+test('a task expands to every message it holds and the whole result', async ($, on) => {
+  mock.clock(on)
+  const { files } = mockEngine(on, 'monitor', POLLER_UP)
+  const messages = [
+    { sender: 'Carol', text: '这个订单能不能直接退款', permalink: 'https://example.slack.com/archives/C1/p1' },
+    { sender: 'proj-support', text: '另外 AI 分类的准确率有数据吗' },
+  ]
+  files[TASKS_PATH] = JSON.stringify([
+    { ...ENDED, sender: '2 条消息 · Carol、proj-support', title: messages[0]?.text, messages, summary: '第一条回了可以；第二条放进了待办。' },
+  ])
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const collapsed = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await collapsed.find({ type: 'Text', text: /准确率/ })).toBeUndefined()
+  expect(await collapsed.find({ type: 'Text', text: /^处理结果$/ })).toBeUndefined()
+  await collapsed.press({ key: 'toggle-task-monitor:1' })
+  await collapsed.unmount()
+
+  const expanded = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await expanded.find({ type: 'Text', text: /准确率/ }))?.text).toBe('另外 AI 分类的准确率有数据吗')
+  expect((await expanded.find({ type: 'Text', text: /^proj-support$/ }))?.text).toBe('proj-support')
+  expect(await expanded.find({ type: 'Text', text: /^处理结果$/ })).toBeDefined()
+  expect((await expanded.find({ type: 'Text', text: /第二条放进了待办/ }))?.text).toBe('第一条回了可以；第二条放进了待办。')
+  await expanded.unmount()
+})

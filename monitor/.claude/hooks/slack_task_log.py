@@ -13,13 +13,20 @@ WORKER_ID = re.compile(r"local_[\w-]+")
 # How another session's message reaches this one.
 REPORT = re.compile(r'<cross-session-message from="(?P<worker>local_[\w-]+)"[^>]*>(?P<body>.*?)(?:</cross-session-message>|\Z)', re.S)
 TITLE_MAX = 80
-SUMMARY_MAX = 200
+MESSAGE_MAX = 600
+SUMMARY_MAX = 1000
 KEPT_TASKS = 20
+
+
+SLACK_ID = re.compile(r"[UWB][A-Z0-9]{7,}")
 
 
 def name_sender(item):
     # Slack display names carry a team suffix ("Alice Wang (ENG - BE)"); the name alone tells who it is.
     name = re.sub(r"\s*\([^)]*\)\s*$", "", item.get("user_name") or "")
+    # The source passes a bare user id on when it found no name for it; an id names nobody.
+    if SLACK_ID.fullmatch(name):
+        name = ""
     channel = item.get("channel_name") or ""
     return " · ".join(part for part in (name, "" if channel.startswith("DM") else channel) if part) or "未知来源"
 
@@ -33,8 +40,16 @@ def clean_text(text):
     return " ".join(text.split())
 
 
+def describe_message(item):
+    message = {"sender": name_sender(item), "text": clean_text(str(item.get("text") or ""))[:MESSAGE_MAX]}
+    permalink = str(item.get("permalink") or "")
+    if permalink.startswith("https://"):
+        message["permalink"] = permalink
+    return message
+
+
 def describe_task(prompt):
-    """Sender, title, link and quietness of the task a prompt starts; None when the prompt is not a task."""
+    """Sender, title, link, messages and quietness of the task a prompt starts; None when the prompt is not a task."""
     head, *rows = prompt.lstrip().split("\n")
     if head.startswith(BOARD_PREFIX):
         return {"title": head.removeprefix(BOARD_PREFIX).strip()[:TITLE_MAX], "quiet": False}
@@ -52,14 +67,15 @@ def describe_task(prompt):
         # A timed check carries no message rows ("[slack-poller] 10:30 跟进检查：…") and runs every few minutes, so it is announced nowhere and leaves the list when it ends.
         label = re.sub(r"^\d{2}:\d{2}\s*", "", head.removeprefix(POLLER_PREFIX).strip()).split("：")[0]
         return {"title": label[:TITLE_MAX], "quiet": True}
-    if len(items) == 1:
-        sender, title = name_sender(items[0]), clean_text(str(items[0].get("text") or ""))
-    else:
-        sender, title = f"{len(items)} 条消息", "、".join(dict.fromkeys(name_sender(item) for item in items))
-    task = {"sender": sender, "title": title[:TITLE_MAX], "quiet": False}
-    permalink = str(items[0].get("permalink") or "")
-    if permalink.startswith("https://"):
-        task["permalink"] = permalink
+    messages = [describe_message(item) for item in items]
+    first = messages[0]
+    sender = first["sender"]
+    if len(messages) > 1:
+        sender = f"{len(messages)} 条消息 · {'、'.join(dict.fromkeys(message['sender'] for message in messages))}"
+    # The list shows the first message's text; the rest are read by expanding the task.
+    task = {"sender": sender, "title": first["text"][:TITLE_MAX], "quiet": False, "messages": messages}
+    if "permalink" in first:
+        task["permalink"] = first["permalink"]
     return task
 
 

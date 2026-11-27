@@ -20,9 +20,9 @@ A long-running Claude Code session that receives your Slack DMs, mentions and Gi
 | `monitor/slack_whoami.mjs` | 用登录态只读地查出 user id、工作区子域名和通知 DM 的 channel id；监控第一次启动时会自动调用它填好配置 |
 | `monitor/slack_backfill.mjs` | 把某一天 Claude 替你发出的消息从 Slack 搜回来，补进设置页「记录」读的 `slack-activity-log.jsonl`（只读 Slack） |
 | `monitor/.claude/hooks/slack_todo_reminder.py` | UserPromptSubmit hook：每条推送进来时把设置页当前的处理方式表和 Claude 自己维护的动态规则（`slack-monitor-rules.md`）注入给 Claude |
-| `monitor/.claude/hooks/slack_task_log.py` | UserPromptSubmit、PostToolUse 和 Stop hook：监控会话开始处理一批推送、一次定时检查或一张待办卡时记一个任务，这一轮结束时记完成；这一轮里用 `SendMessage` 把事情转给了别的会话的，等那个会话发回执回来才记完成。写进 `~/.claude/slack-tasks.json`，标题里的 Slack 链接标记和 `<@U…>` 这类 id 会去掉 |
+| `monitor/.claude/hooks/slack_task_log.py` | UserPromptSubmit、PostToolUse 和 Stop hook：监控会话开始处理一批推送、一次定时检查或一张待办卡时记一个任务，这一轮结束时记完成；这一轮里用 `SendMessage` 把事情转给了别的会话的，等那个会话发回执回来才记完成。写进 `~/.claude/slack-tasks.json`，每条消息的发送人和内容都记下来，Slack 链接标记、`<@U…>` 这类 id 和只有 id 的发送人名字会去掉 |
 | `monitor/slack-monitor.md`、`monitor/CLAUDE.md` | 给 Claude 的分诊规则模板，按自己的习惯改 |
-| `slack-todo/` | Claude Code mod：侧边的 Slack 监控面板。上面一行是 poller 是否在跑、有没有连上 Slack，旁边的「设置页」按钮用系统浏览器打开设置页；中间是待办看板（`add_todo`、`resolve_todo` 工具和 `/todo` 命令，每张卡可以「按建议执行」「修改执行方式」或「忽略」，用户在别处处理完的卡由 Claude 用 `resolve_todo` 关掉）；下面是监控会话正在处理、已转给别的会话和处理完的任务，处理完的可以单条「移除」或「清空已完成」；最下面是今天收到、推给 Claude、代发的条数和每小时柱状图。消息和待办的任务在开始和结束时各弹一次 toast 和系统通知 |
+| `slack-todo/` | Claude Code mod：侧边的 Slack 监控面板。上面一行是 poller 是否在跑、有没有连上 Slack，旁边的「设置页」按钮用系统浏览器打开设置页；中间是待办看板（`add_todo`、`resolve_todo` 工具和 `/todo` 命令，每张卡可以「按建议执行」「修改执行方式」或「忽略」，用户在别处处理完的卡由 Claude 用 `resolve_todo` 关掉）；下面是监控会话正在处理、已转给别的会话和处理完的任务，点任务名展开能看到每条消息的发送人和内容、完整的处理结果，处理完的可以单条「移除」或「清空已完成」；最下面是今天收到、推给 Claude、代发的条数和每小时柱状图。消息和待办的任务在开始和结束时各弹一次 toast 和系统通知 |
 
 ## 环境要求
 
