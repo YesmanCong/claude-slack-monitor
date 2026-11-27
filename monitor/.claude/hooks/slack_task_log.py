@@ -1,4 +1,4 @@
-"""UserPromptSubmit, PostToolUse and Stop hook: keep the list of tasks the monitor session is working on or has handed to another session. The slack-tasks mod draws it above the prompt."""
+"""UserPromptSubmit, PostToolUse and Stop hook: keep the list of tasks the monitor session is working on or has handed to another session. The slack-todo mod draws it in its pane."""
 import datetime as dt
 import json
 import os

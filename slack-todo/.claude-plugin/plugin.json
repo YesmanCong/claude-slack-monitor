@@ -1,6 +1,6 @@
 {
   "name": "slack-todo",
-  "version": "0.3.0",
-  "description": "待办看板：Claude 把需要你拍板的事列进来，逐条选择按建议执行、修改执行方式或忽略",
+  "version": "0.4.0",
+  "description": "Slack 监控面板：Claude 把需要你拍板的事列成待办，逐条选择按建议执行、修改执行方式或忽略；同一个面板里还有 poller 是否在跑、监控会话正在处理和处理完的任务、今天的消息数和每小时柱状图；任务开始和结束时弹 toast 和系统通知",
   "types": "./types/index.d.ts"
 }
